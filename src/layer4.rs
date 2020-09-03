@@ -27,7 +27,7 @@ pub fn recv_loop() {
                     let local_tx = tx.clone();
                     thread::spawn(move || {
                         for _ in 1..60 {
-                            let mut buf = vec![0; 1024];
+                            let mut buf = vec![0; 96];
                             let mut packet = MutableIcmpPacket::new(&mut buf).unwrap();
                             packet.set_icmp_code(IcmpCode(0));
                             packet.set_icmp_type(IcmpType(0));
