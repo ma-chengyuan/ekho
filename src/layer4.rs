@@ -26,7 +26,7 @@ pub fn recv_loop() {
                     println!("Received ICMP ping request from {} with id {}", addr, id);
                     let local_tx = tx.clone();
                     thread::spawn(move || {
-                        for _ in 1..60 {
+                        for _ in 0..240 {
                             let mut buf = vec![0; 96];
                             let mut packet = MutableIcmpPacket::new(&mut buf).unwrap();
                             packet.set_icmp_code(IcmpCode(0));
@@ -40,7 +40,7 @@ pub fn recv_loop() {
                                 let mut tx = local_tx.lock().unwrap();
                                 tx.send_to(packet, addr).unwrap();
                             }
-                            thread::sleep(time::Duration::from_millis(500));
+                            thread::sleep(time::Duration::from_millis(1000));
                         }
                     });
                 } else {
