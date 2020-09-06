@@ -52,7 +52,7 @@ pub fn init_and_loop() {
     if cfg!(windows) {
         win_fix::fix_windows_error(&rx);
     }
-    if true {
+    loop {
         let mut packet = MutableIcmpPacket::owned(vec![0u8; 8]).unwrap();
         packet.set_icmp_type(IcmpType(0));
         packet.set_icmp_code(IcmpCode(0));
