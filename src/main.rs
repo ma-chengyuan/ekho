@@ -3,13 +3,13 @@ mod icmp;
 mod ntt;
 mod socks;
 
+use crate::config::Config;
 use crate::ntt::NTTStream;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::env;
+use std::net::Ipv4Addr;
 use tokio::io::Result;
 use tokio::prelude::*;
-use crate::config::Config;
-use std::net::Ipv4Addr;
 
 fn main() {
     simple_logger::SimpleLogger::new().init().unwrap();
