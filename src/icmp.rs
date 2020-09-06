@@ -179,5 +179,7 @@ mod win_fix {
 
 #[cfg(not(windows))]
 mod win_fix {
-    pub fn fix_windows_error(tx: &TransportSender) {}
+    use pnet::transport::TransportReceiver;
+
+    pub fn fix_windows_error(tx: &TransportReceiver) {}
 }
