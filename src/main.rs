@@ -8,7 +8,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::env;
 use tokio::io::Result;
 use tokio::prelude::*;
-use winapi::um::winbase::ConvertFiberToThread;
 use crate::config::Config;
 use std::net::Ipv4Addr;
 
