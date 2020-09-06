@@ -12,6 +12,7 @@ use pnet::transport::{
     icmp_packet_iter, transport_channel, TransportChannelType, TransportProtocol,
 };
 use pnet::util::{MacAddr, ParseMacAddrErr};
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, RwLock};
@@ -55,8 +56,12 @@ pub fn init_and_loop() {
         packet.set_icmp_type(IcmpType(0));
         packet.set_icmp_code(IcmpCode(0));
         packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
-        tx.send_to(packet.consume_to_immutable(), IpAddr::V4(dest_ip))
-            .unwrap();
+        let result = tx.send_to(packet.consume_to_immutable(), IpAddr::V4(dest_ip));
+        match result {
+            Ok(_) => continue,
+            Err(e) if e.kind() == ErrorKind::Other => continue,
+            Err(e) => panic!("{}", e),
+        }
     }
     let mut iter = icmp_packet_iter(&mut rx);
     loop {
