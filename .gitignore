@@ -1,4 +1,5 @@
 /target
 /.idea
 /lib
+/legacy
 /Cargo.lock

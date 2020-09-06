@@ -1,30 +1,27 @@
-use tokio::io::{AsyncRead, AsyncWrite, Result, Error, ErrorKind};
-use bytes::{BytesMut, BufMut};
+use bytes::{BufMut, BytesMut};
 use pin_project_lite::pin_project;
-use std::task::Context;
-use tokio::macros::support::{Pin, Poll};
 use std::cmp::min;
+use std::task::Context;
+use tokio::io::{AsyncRead, AsyncWrite, Error, ErrorKind, Result};
+use tokio::macros::support::{Pin, Poll};
 
 const LOG_BLOCK_SIZE: usize = 8;
 pub const BLOCK_SIZE: usize = 1 << LOG_BLOCK_SIZE;
 const PRIME: i32 = 257;
 const INV: [usize; BLOCK_SIZE] = [
-    0, 128, 64, 192, 32, 160, 96, 224, 16, 144, 80, 208, 48, 176, 112, 240,
-    8, 136, 72, 200, 40, 168, 104, 232, 24, 152, 88, 216, 56, 184, 120, 248,
-    4, 132, 68, 196, 36, 164, 100, 228, 20, 148, 84, 212, 52, 180, 116, 244,
-    12, 140, 76, 204, 44, 172, 108, 236, 28, 156, 92, 220, 60, 188, 124, 252,
-    2, 130, 66, 194, 34, 162, 98, 226, 18, 146, 82, 210, 50, 178, 114, 242,
-    10, 138, 74, 202, 42, 170, 106, 234, 26, 154, 90, 218, 58, 186, 122, 250,
-    6, 134, 70, 198, 38, 166, 102, 230, 22, 150, 86, 214, 54, 182, 118, 246,
-    14, 142, 78, 206, 46, 174, 110, 238, 30, 158, 94, 222, 62, 190, 126, 254,
-    1, 129, 65, 193, 33, 161, 97, 225, 17, 145, 81, 209, 49, 177, 113, 241,
-    9, 137, 73, 201, 41, 169, 105, 233, 25, 153, 89, 217, 57, 185, 121, 249,
-    5, 133, 69, 197, 37, 165, 101, 229, 21, 149, 85, 213, 53, 181, 117, 245,
-    13, 141, 77, 205, 45, 173, 109, 237, 29, 157, 93, 221, 61, 189, 125, 253,
-    3, 131, 67, 195, 35, 163, 99, 227, 19, 147, 83, 211, 51, 179, 115, 243,
-    11, 139, 75, 203, 43, 171, 107, 235, 27, 155, 91, 219, 59, 187, 123, 251,
-    7, 135, 71, 199, 39, 167, 103, 231, 23, 151, 87, 215, 55, 183, 119, 247,
-    15, 143, 79, 207, 47, 175, 111, 239, 31, 159, 95, 223, 63, 191, 127, 255
+    0, 128, 64, 192, 32, 160, 96, 224, 16, 144, 80, 208, 48, 176, 112, 240, 8, 136, 72, 200, 40,
+    168, 104, 232, 24, 152, 88, 216, 56, 184, 120, 248, 4, 132, 68, 196, 36, 164, 100, 228, 20,
+    148, 84, 212, 52, 180, 116, 244, 12, 140, 76, 204, 44, 172, 108, 236, 28, 156, 92, 220, 60,
+    188, 124, 252, 2, 130, 66, 194, 34, 162, 98, 226, 18, 146, 82, 210, 50, 178, 114, 242, 10, 138,
+    74, 202, 42, 170, 106, 234, 26, 154, 90, 218, 58, 186, 122, 250, 6, 134, 70, 198, 38, 166, 102,
+    230, 22, 150, 86, 214, 54, 182, 118, 246, 14, 142, 78, 206, 46, 174, 110, 238, 30, 158, 94,
+    222, 62, 190, 126, 254, 1, 129, 65, 193, 33, 161, 97, 225, 17, 145, 81, 209, 49, 177, 113, 241,
+    9, 137, 73, 201, 41, 169, 105, 233, 25, 153, 89, 217, 57, 185, 121, 249, 5, 133, 69, 197, 37,
+    165, 101, 229, 21, 149, 85, 213, 53, 181, 117, 245, 13, 141, 77, 205, 45, 173, 109, 237, 29,
+    157, 93, 221, 61, 189, 125, 253, 3, 131, 67, 195, 35, 163, 99, 227, 19, 147, 83, 211, 51, 179,
+    115, 243, 11, 139, 75, 203, 43, 171, 107, 235, 27, 155, 91, 219, 59, 187, 123, 251, 7, 135, 71,
+    199, 39, 167, 103, 231, 23, 151, 87, 215, 55, 183, 119, 247, 15, 143, 79, 207, 47, 175, 111,
+    239, 31, 159, 95, 223, 63, 191, 127, 255,
 ];
 const OMEGA: [i32; LOG_BLOCK_SIZE] = [256, 241, 64, 249, 136, 81, 9, 3];
 const OMEGA_INV: [i32; LOG_BLOCK_SIZE] = [256, 16, 253, 32, 240, 165, 200, 86];
@@ -53,7 +50,11 @@ fn ntt_raw(x: &mut [i32; BLOCK_SIZE], omega: &[i32; LOG_BLOCK_SIZE]) {
 
 pub fn ntt(block: &[u8]) -> BytesMut {
     if block.len() >= BLOCK_SIZE {
-        panic!("NTT block too long: expected less than {}, found {}", BLOCK_SIZE, block.len())
+        panic!(
+            "NTT block too long: expected less than {}, found {}",
+            BLOCK_SIZE,
+            block.len()
+        )
     }
     let mut x = [0; BLOCK_SIZE];
     x[0] = block.len() as i32;
@@ -77,8 +78,11 @@ pub fn ntt(block: &[u8]) -> BytesMut {
 pub fn intt(block: &[u8]) -> BytesMut {
     let overflow = *block.first().expect("empty INTT block");
     if block.len() != 1 + overflow as usize + BLOCK_SIZE {
-        panic!("wrong INTT block length: expected {}, found {}",
-               1 + overflow as usize + BLOCK_SIZE, block.len())
+        panic!(
+            "wrong INTT block length: expected {}, found {}",
+            1 + overflow as usize + BLOCK_SIZE,
+            block.len()
+        )
     }
     let mut x: [i32; BLOCK_SIZE] = [0; BLOCK_SIZE];
     for i in 0..BLOCK_SIZE {
@@ -93,7 +97,10 @@ pub fn intt(block: &[u8]) -> BytesMut {
     }
     let len = x[0] as usize;
     if len >= BLOCK_SIZE {
-        panic!("inner block size too large, expected less than {}, found {}", BLOCK_SIZE, len)
+        panic!(
+            "inner block size too large, expected less than {}, found {}",
+            BLOCK_SIZE, len
+        )
     }
     let mut ret = BytesMut::with_capacity(len);
     ret.extend(x[1..1 + len].iter().map(|&x| x as u8));
@@ -129,43 +136,57 @@ impl<T> NTTStream<T> {
             inner,
             read_raw: BytesMut::with_capacity(NTT_READ_RAW_CAPACITY),
             read_buf: BytesMut::with_capacity(BLOCK_SIZE),
-            write_buf: BytesMut::with_capacity(2 * BLOCK_SIZE)
+            write_buf: BytesMut::with_capacity(2 * BLOCK_SIZE),
         }
     }
 }
 
-impl<T> AsyncRead for NTTStream<T> where T: AsyncRead {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<Result<usize>> {
+impl<T> AsyncRead for NTTStream<T>
+where
+    T: AsyncRead,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Result<usize>> {
         let mut read = 0;
         let mut this = self.project();
         let buf_len = buf.len();
-        if !this.read_buf.is_empty() { // If we have left some unread decoded bytes, read it first
+        if !this.read_buf.is_empty() {
+            // If we have left some unread decoded bytes, read it first
             let len = min(buf_len, this.read_buf.len());
             buf[..len].copy_from_slice(&this.read_buf.split_to(len));
             read += len;
-            if read == buf_len { // Return if the buffer is filled up
+            if read == buf_len {
+                // Return if the buffer is filled up
                 return Poll::Ready(Ok(read));
             }
         }
         debug_assert!(this.read_buf.is_empty());
-        while !has_full_ntt_block(this.read_raw) { // Try to get at least one complete NTT block
+        while !has_full_ntt_block(this.read_raw) {
+            // Try to get at least one complete NTT block
             match this.inner.as_mut().poll_read_buf(cx, &mut this.read_raw) {
                 Poll::Pending => return Poll::Pending, // Forward pending
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)), // Forward error
-                Poll::Ready(Ok(0)) => return Poll::Ready(if this.read_raw.is_empty() {
-                    Ok(0) // If haven't read any partial INTT block, then EOF is acceptable
-                } else {
-                    // Otherwise we have EOF in the middle of a NTT block, which is bad
-                    Err(Error::new(ErrorKind::UnexpectedEof, "incomplete NTT block"))
-                }),
-                _ => continue
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(if this.read_raw.is_empty() {
+                        Ok(0) // If haven't read any partial INTT block, then EOF is acceptable
+                    } else {
+                        // Otherwise we have EOF in the middle of a NTT block, which is bad
+                        Err(Error::new(ErrorKind::UnexpectedEof, "incomplete NTT block"))
+                    });
+                }
+                _ => continue,
             }
         }
         debug_assert!(has_full_ntt_block(this.read_raw));
-        while has_full_ntt_block(this.read_raw) { // Time to decode the block and fill buf
+        while has_full_ntt_block(this.read_raw) {
+            // Time to decode the block and fill buf
             let len = 1 + BLOCK_SIZE + this.read_raw[0] as usize;
             let mut res = intt(&this.read_raw.split_to(len));
-            if read + res.len() <= buf_len { // If we can append the whole res to buf, append it
+            if read + res.len() <= buf_len {
+                // If we can append the whole res to buf, append it
                 buf[read..read + res.len()].copy_from_slice(&res);
                 read += res.len();
             } else {
@@ -187,12 +208,16 @@ impl<T> AsyncRead for NTTStream<T> where T: AsyncRead {
     }
 }
 
-impl<T> AsyncWrite for NTTStream<T> where T: AsyncWrite {
+impl<T> AsyncWrite for NTTStream<T>
+where
+    T: AsyncWrite,
+{
     /// **WARNING:** You should best set the buffer size to multiples of (`BLOCK_SIZE` - 1) (which is
     /// 255 bytes), otherwise the output may bloat considerably.
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         let mut this = self.project();
-        while !this.write_buf.is_empty() { // If there are an unwritten partial NTT block, write them first
+        while !this.write_buf.is_empty() {
+            // If there are an unwritten partial NTT block, write them first
             let res = this.inner.as_mut().poll_write_buf(cx, &mut this.write_buf);
             if let Poll::Pending | Poll::Ready(Err(_)) | Poll::Ready(Ok(0)) = res {
                 return res; // Forward pending, error, or EOF
@@ -209,9 +234,12 @@ impl<T> AsyncWrite for NTTStream<T> where T: AsyncWrite {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)), // Forward error
                 // Forward EOF, but only when this is the first piece of data we are trying to write
                 Poll::Ready(Ok(0)) if written == len => return Poll::Ready(Ok(0)),
-                _ => if !res.is_empty() { // Otherwise, leave unwritten part of res in the buffer
-                    *this.write_buf = res;
-                    break;
+                _ => {
+                    if !res.is_empty() {
+                        // Otherwise, leave unwritten part of res in the buffer
+                        *this.write_buf = res;
+                        break;
+                    }
                 }
             }
         }
@@ -220,12 +248,13 @@ impl<T> AsyncWrite for NTTStream<T> where T: AsyncWrite {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let mut this = self.project();
-        while !this.write_buf.is_empty() { // Flush internal buffer
+        while !this.write_buf.is_empty() {
+            // Flush internal buffer
             match this.inner.as_mut().poll_write_buf(cx, &mut this.write_buf) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(0)) => break,
-                _ => continue
+                _ => continue,
             }
         }
         this.inner.as_mut().poll_flush(cx)

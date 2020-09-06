@@ -1,11 +1,11 @@
-use tokio::io::{Result, Error, ErrorKind};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, TcpListener};
 use crate::ntt::*;
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::convert::TryInto;
-use bytes::{BytesMut, Buf};
+use bytes::{Buf, BytesMut};
 use std::cmp::min;
+use std::convert::TryInto;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{Error, ErrorKind, Result};
+use tokio::net::{TcpListener, TcpStream};
 
 const SOCKS_VER: u8 = 5;
 const METHOD_NO_AUTH: u8 = 0;
@@ -14,7 +14,10 @@ const ATYP_DOMAIN: u8 = 3;
 const ATYP_IPV6: u8 = 4;
 
 pub async fn copy_from_ntt<T: ?Sized, U: ?Sized>(from: &mut T, to: &mut U) -> Result<()>
-    where T: AsyncRead + Unpin, U: AsyncWrite + Unpin {
+where
+    T: AsyncRead + Unpin,
+    U: AsyncWrite + Unpin,
+{
     let mut buf = [0u8; 4 * (BLOCK_SIZE + 3)];
     let mut ptr = 0usize;
     loop {
@@ -23,11 +26,15 @@ pub async fn copy_from_ntt<T: ?Sized, U: ?Sized>(from: &mut T, to: &mut U) -> Re
         let mut head = 0;
         while head < ptr {
             let size = 1 + (buf[head] as usize) + BLOCK_SIZE;
-            if ptr < head + size { break; }
+            if ptr < head + size {
+                break;
+            }
             to.write_all(&intt(&buf[head..head + size])).await?;
             head += size;
         }
-        if read == 0 { break; }
+        if read == 0 {
+            break;
+        }
         buf.copy_within(head..ptr, 0);
         ptr -= head;
     }
@@ -35,11 +42,16 @@ pub async fn copy_from_ntt<T: ?Sized, U: ?Sized>(from: &mut T, to: &mut U) -> Re
 }
 
 pub async fn copy_to_ntt<T: ?Sized, U: ?Sized>(from: &mut T, to: &mut U) -> Result<()>
-    where T: AsyncRead + Unpin, U: AsyncWrite + Unpin {
+where
+    T: AsyncRead + Unpin,
+    U: AsyncWrite + Unpin,
+{
     let mut buf = [0u8; 8 * (BLOCK_SIZE - 1)];
     loop {
         let read = from.read(&mut buf).await?;
-        if read == 0 { break; }
+        if read == 0 {
+            break;
+        }
         let mut head = 0;
         while head < read {
             let len = min(read - head, BLOCK_SIZE - 1);
@@ -62,18 +74,26 @@ fn parse_address(data: &[u8]) -> Result<String> {
     match data[0] {
         ATYP_IPV4 if data.len() == 1 + 4 + 2 => {
             let octets: [u8; 4] = data[1..1 + 4].try_into().unwrap();
-            Ok(format!("{}:{}", Ipv4Addr::from(octets), parse_port(&data[1 + 4..])))
+            Ok(format!(
+                "{}:{}",
+                Ipv4Addr::from(octets),
+                parse_port(&data[1 + 4..])
+            ))
         }
         ATYP_IPV6 if data.len() == 1 + 16 + 2 => {
             let octets: [u8; 16] = data[1..1 + 16].try_into().unwrap();
-            Ok(format!("{}:{}", Ipv6Addr::from(octets), parse_port(&data[1 + 16..])))
+            Ok(format!(
+                "{}:{}",
+                Ipv6Addr::from(octets),
+                parse_port(&data[1 + 16..])
+            ))
         }
         ATYP_DOMAIN if data.len() == 1 + 1 + data[1] as usize + 2 => {
             let len = data[1] as usize;
             let domain = String::from_utf8_lossy(&data[2..2 + len]);
             Ok(format!("{}:{}", domain, parse_port(&data[2 + len..])))
         }
-        _ => Err(Error::new(ErrorKind::Other, "failed to parse address"))
+        _ => Err(Error::new(ErrorKind::Other, "failed to parse address")),
     }
 }
 
