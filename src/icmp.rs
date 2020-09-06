@@ -52,15 +52,17 @@ pub fn init_and_loop() {
     let dest_ip = get_config().dest_ip;
     win_fix::fix_windows_error(&rx);
     loop {
-        let mut packet = MutableIcmpPacket::owned(vec![0u8; 8]).unwrap();
+        let mut packet = MutableIcmpPacket::owned(vec![0u8; 4 + 1024]).unwrap();
         packet.set_icmp_type(IcmpType(0));
         packet.set_icmp_code(IcmpCode(0));
         packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
         let result = tx.send_to(packet.consume_to_immutable(), IpAddr::V4(dest_ip));
         match result {
             Ok(_) => continue,
-            Err(e) if e.kind() == ErrorKind::Other => continue,
-            Err(e) => panic!("{}", e),
+            Err(e) => match e.raw_os_error() {
+                Some(105 /*ENOBUFS*/) if cfg!(not(windows)) => continue,
+                _ => panic!("error sending ICMP packets: {}", e),
+            },
         }
     }
     let mut iter = icmp_packet_iter(&mut rx);
