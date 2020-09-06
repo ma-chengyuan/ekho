@@ -78,6 +78,7 @@ pub fn init_and_loop() {
     }
 }
 
+#[cfg(windows)]
 mod win_fix {
     use pnet::datalink;
     use pnet::ipnetwork::IpNetwork;
@@ -96,7 +97,6 @@ mod win_fix {
     use winapi::um::winsock2;
     use winapi::um::winsock2::{bind, inet_addr, WSAIoctl, SOCKET, SOCKET_ERROR};
 
-    #[cfg(windows)]
     fn guess_local_ip() -> Option<Ipv4Addr> {
         unsafe {
             let mut ptr = HeapAlloc(GetProcessHeap(), 0, mem::size_of::<MIB_IPFORWARDTABLE>())
@@ -131,7 +131,6 @@ mod win_fix {
         }
     }
 
-    #[cfg(windows)]
     pub fn fix_windows_error(tx: &TransportReceiver) {
         unsafe {
             let socket = tx.socket.fd as SOCKET;
@@ -176,7 +175,9 @@ mod win_fix {
             }
         }
     }
+}
 
-    #[cfg(not(windows))]
+#[cfg(not(windows))]
+mod win_fix {
     pub fn fix_windows_error(tx: &TransportSender) {}
 }
