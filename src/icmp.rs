@@ -1,76 +1,53 @@
+#![allow(clippy::cast_ptr_alignment)]
+
 use crate::config::get_config;
-use pnet::datalink;
-use pnet::datalink::{DataLinkReceiver, DataLinkSender, NetworkInterface};
-use pnet::ipnetwork::IpNetwork;
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
-use pnet::packet::icmp::IcmpPacket;
-use pnet::packet::icmp::{IcmpCode, IcmpType, MutableIcmpPacket};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crossbeam_channel::{Receiver, Sender};
+use lazy_static::lazy_static;
+use once_cell::sync::OnceCell;
+use pnet::packet::icmp::{IcmpCode, IcmpPacket, IcmpType, MutableIcmpPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4::Ipv4Packet;
-use pnet::packet::Packet;
+use pnet::packet::MutablePacket;
 use pnet::transport::{
     icmp_packet_iter, transport_channel, TransportChannelType, TransportProtocol,
+    TransportReceiver, TransportSender,
 };
-use pnet::util::{MacAddr, ParseMacAddrErr};
-use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr};
-use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, RwLock};
-use std::thread;
+use std::net::IpAddr;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
-fn is_valid_interface(iface: &NetworkInterface) -> bool {
-    (cfg!(windows) || iface.is_up()) && !iface.is_loopback() && iface.mac.is_some()
+const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
+lazy_static! {
+    static ref CHANNEL: (Sender<Bytes>, Receiver<Bytes>) = crossbeam_channel::bounded(10);
 }
 
-fn get_interface_by_name(name: &str) -> Option<NetworkInterface> {
-    if let Some(iface) = datalink::interfaces()
-        .into_iter()
-        .find(|iface| iface.name == name)
-    {
-        if is_valid_interface(&iface) {
-            return Some(iface);
-        }
-    }
-    None
-}
-
-fn get_interface_ip(iface: &NetworkInterface) -> Option<Ipv4Addr> {
-    if let Some(ip) = iface.ips.first() {
-        if let IpNetwork::V4(ipv4) = ip {
-            return Some(ipv4.ip());
-        }
-    }
-    None
+pub fn get_sender() -> Sender<Bytes> {
+    CHANNEL.0.clone()
 }
 
 pub fn init_and_loop() {
     let (mut tx, mut rx) = transport_channel(
-        8192,
+        get_config().layer4_buffer,
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
     .expect("error creating transport channel");
-    let dest_ip = get_config().dest_ip;
     win_fix::fix_windows_error(&rx);
-    loop {
-        let mut packet = MutableIcmpPacket::owned(vec![0u8; 4 + 1024]).unwrap();
-        packet.set_icmp_type(IcmpType(0));
-        packet.set_icmp_code(IcmpCode(0));
-        packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
-        let result = tx.send_to(packet.consume_to_immutable(), IpAddr::V4(dest_ip));
-        match result {
-            Ok(_) => continue,
-            Err(e) => match e.raw_os_error() {
-                Some(105 /*ENOBUFS*/) if cfg!(not(windows)) => continue,
-                _ => panic!("error sending ICMP packets: {}", e),
-            },
-        }
-    }
-    let mut iter = icmp_packet_iter(&mut rx);
+    crossbeam_utils::thread::scope(|s| {
+        // TODO: Make both threads adapt to change of IP
+        s.spawn(|_| rx_loop(&mut rx));
+        s.spawn(|_| tx_loop(&mut tx, CHANNEL.1.clone()));
+    })
+    .unwrap();
+}
+
+fn rx_loop(rx: &mut TransportReceiver) {
+    let dest_ip = get_config().dest_ip;
+    let mut iter = icmp_packet_iter(rx);
     loop {
         match iter.next() {
             Ok((packet, addr)) => {
                 if let IpAddr::V4(ipv4) = addr {
-                    if ipv4 == dest_ip {
+                    if true {
                         log::info!(
                             "ICMP packet from {:?} {:?} {:?}",
                             addr,
@@ -85,60 +62,124 @@ pub fn init_and_loop() {
     }
 }
 
+fn tx_loop(tx: &mut TransportSender, input: Receiver<Bytes>) {
+    const HEADER: usize = IcmpPacket::minimum_packet_size();
+    let dest_ip = IpAddr::V4(get_config().dest_ip);
+    let mut buf = [0u8; 1500];
+    let mut resend_last_packet = false;
+    let mut packet_len = 0usize;
+    loop {
+        let result = if resend_last_packet {
+            tx.send_to(IcmpPacket::new(&buf[..packet_len]).unwrap(), dest_ip)
+        } else {
+            let block = input.recv().expect("error receiving data");
+            packet_len = HEADER + 4 /* conv */ + 3 /* magic number */ + 1 /* type */ + block.len();
+            let mut packet = MutableIcmpPacket::new(&mut buf[0..packet_len]).unwrap();
+            packet.set_icmp_type(IcmpType(0));
+            packet.set_icmp_code(IcmpCode(0));
+            let payload = packet.payload_mut();
+            payload[..4].copy_from_slice(&44353u32.to_be_bytes());
+            payload[4..4 + 3].copy_from_slice(&MAGIC);
+            payload[4 + 3] = 0 /* RESERVED */;
+            payload[4 + 3 + 1..].copy_from_slice(&block);
+            tx.send_to(packet.consume_to_immutable(), dest_ip)
+        };
+        resend_last_packet = match result {
+            Ok(_) => false,
+            Err(e) => match e.raw_os_error() {
+                Some(105 /*ENOBUFS on Unix*/) if cfg!(unix) => true,
+                _ => panic!("error sending ICMP packets: {}", e),
+            },
+        }
+    }
+}
+
 #[cfg(windows)]
 mod win_fix {
     use pnet::datalink;
     use pnet::ipnetwork::IpNetwork;
     use pnet::transport::TransportReceiver;
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
     use std::mem;
     use std::net::Ipv4Addr;
+    use std::time::Instant;
     use winapi::ctypes::c_int;
+    use winapi::shared::ifdef::IF_INDEX;
     use winapi::shared::ipmib::{MIB_IPFORWARDTABLE, PMIB_IPFORWARDTABLE};
     use winapi::shared::minwindef::{DWORD, LPDWORD, LPVOID, ULONG};
     use winapi::shared::mstcpip::{RCVALL_ON, SIO_RCVALL};
-    use winapi::shared::winerror::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+    use winapi::shared::ntdef::PVOID;
+    use winapi::shared::winerror::{ERROR_BUFFER_OVERFLOW, ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
     use winapi::shared::ws2def::{ADDRESS_FAMILY, AF_INET, INADDR_ANY, SOCKADDR, SOCKADDR_IN};
     use winapi::um::heapapi::{GetProcessHeap, HeapAlloc, HeapFree};
-    use winapi::um::iphlpapi::GetIpForwardTable;
+    use winapi::um::iphlpapi::{GetAdaptersAddresses, GetIpForwardTable};
+    use winapi::um::iptypes::{
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_FRIENDLY_NAME,
+        GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES, PIP_ADAPTER_ADDRESSES,
+    };
     use winapi::um::winsock2;
-    use winapi::um::winsock2::{bind, inet_addr, WSAIoctl, SOCKET, SOCKET_ERROR};
+    use winapi::um::winsock2::{bind, inet_addr, inet_ntoa, WSAIoctl, SOCKET, SOCKET_ERROR};
 
-    fn guess_local_ip() -> Option<Ipv4Addr> {
-        unsafe {
-            let mut ptr = HeapAlloc(GetProcessHeap(), 0, mem::size_of::<MIB_IPFORWARDTABLE>())
-                as PMIB_IPFORWARDTABLE;
-            let mut size: ULONG = 0;
-            if GetIpForwardTable(ptr, &mut size, 0) == ERROR_INSUFFICIENT_BUFFER {
-                HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
-                ptr = HeapAlloc(GetProcessHeap(), 0, size as usize) as PMIB_IPFORWARDTABLE;
-            }
-            if GetIpForwardTable(ptr, &mut size, 0) == NO_ERROR {
-                for i in 0..(*ptr).dwNumEntries {
-                    let row = &(*ptr).table[i as usize];
-                    if row.dwForwardDest == INADDR_ANY
-                        && row.dwForwardMask == INADDR_ANY
-                        && row.dwForwardMetric1 != 0
-                    // Exclude virtual TUN/TAP adaptors
+    unsafe fn get_ip_from_index(index: IF_INDEX) -> Option<Ipv4Addr> {
+        const BUFFER_SIZE: usize = 32768;
+        static mut BUFFER: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
+        let ptr = BUFFER.as_mut_ptr() as PIP_ADAPTER_ADDRESSES;
+        let mut size: ULONG = BUFFER_SIZE as ULONG;
+        let flags = GAA_FLAG_SKIP_MULTICAST
+            | GAA_FLAG_SKIP_ANYCAST
+            | GAA_FLAG_SKIP_FRIENDLY_NAME
+            | GAA_FLAG_SKIP_DNS_SERVER;
+        if GetAdaptersAddresses(AF_INET as ULONG, flags, 0 as PVOID, ptr, &mut size) == NO_ERROR {
+            let mut current = ptr;
+            while !current.is_null() {
+                if (*current).u.s().IfIndex == index {
+                    let addr = (*current).FirstUnicastAddress;
+                    if !addr.is_null()
+                        && (*(*addr).Address.lpSockaddr).sa_family == AF_INET as ADDRESS_FAMILY
                     {
-                        if let Some(iface) = datalink::interfaces()
-                            .into_iter()
-                            .find(|iface| iface.index == row.dwForwardIfIndex)
-                        {
-                            if let Some(IpNetwork::V4(ip)) = iface.ips.first() {
-                                HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
-                                return Some(ip.ip());
-                            }
-                        }
+                        let sockaddr = (*addr).Address.lpSockaddr as *mut SOCKADDR_IN;
+                        let s = (*sockaddr).sin_addr.S_un.S_un_b();
+                        let ret = Ipv4Addr::new(s.s_b1, s.s_b2, s.s_b3, s.s_b4);
+                        return Some(ret);
                     }
                 }
+                current = (*current).Next;
             }
-            HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
-            None
         }
+        None
+    }
+
+    unsafe fn guess_local_ip() -> Option<Ipv4Addr> {
+        let mut ptr = HeapAlloc(GetProcessHeap(), 0, mem::size_of::<MIB_IPFORWARDTABLE>())
+            as PMIB_IPFORWARDTABLE;
+        let mut size: ULONG = 0;
+        if GetIpForwardTable(ptr, &mut size, 0) == ERROR_INSUFFICIENT_BUFFER {
+            HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+            ptr = HeapAlloc(GetProcessHeap(), 0, size as usize) as PMIB_IPFORWARDTABLE;
+        }
+        if GetIpForwardTable(ptr, &mut size, 0) == NO_ERROR {
+            for i in 0..(*ptr).dwNumEntries {
+                let row = &(*ptr).table[i as usize];
+                if row.dwForwardDest == INADDR_ANY
+                    && row.dwForwardMask == INADDR_ANY
+                    && row.dwForwardMetric1 != 0
+                // Exclude virtual TUN/TAP adapters
+                {
+                    return get_ip_from_index(row.dwForwardIfIndex);
+                }
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+        None
     }
 
     pub fn fix_windows_error(tx: &TransportReceiver) {
+        let mut test = None;
+        let start = Instant::now();
+        for _ in 0..1000 {
+            test = unsafe { guess_local_ip() };
+        }
+        println!("{:?}", start.elapsed());
         unsafe {
             let socket = tx.socket.fd as SOCKET;
             let mut addr: SOCKADDR_IN = mem::zeroed();
@@ -188,5 +229,5 @@ mod win_fix {
 mod win_fix {
     use pnet::transport::TransportReceiver;
 
-    pub fn fix_windows_error(tx: &TransportReceiver) {}
+    pub fn fix_windows_error(_tx: &TransportReceiver) {}
 }
