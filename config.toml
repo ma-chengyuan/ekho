@@ -1,0 +1,21 @@
+dest_ip = "192.168.100.32"
+
+# KCP layer configurations
+[kcp]
+# No delay mode
+nodelay = false
+# Update interval
+interval = 10
+# Enable fast resend?
+resend = 0
+# Enable flow control?
+flow_control = true
+# (Optional) KCP scheduler interval, default 5ms
+scheduler_interval = 5
+
+# ICMP layer configuration
+[icmp]
+# Identifier for ICMP echo packet
+id = 44353
+# (Optional) ICMP receive buffer size, default 4096
+buffer_size = 4096

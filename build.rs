@@ -2,17 +2,27 @@ use std::env;
 use std::io::{Error, ErrorKind};
 use std::path::PathBuf;
 
-#[cfg(windows)]
-fn add_packet_lib() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    println!("cargo:rustc-link-search=native={}/lib", manifest_dir);
-}
-
-#[cfg(not(windows))]
-fn add_packet_lib() {}
-
 fn main() {
-    add_packet_lib();
+    if cfg!(target_os = "windows") {
+        let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+        println!("cargo:rustc-link-search=native={}/lib", manifest_dir);
+
+        let mut res = winres::WindowsResource::new();
+        res.set_manifest(
+            r#"
+            <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+            <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+                <security>
+                    <requestedPrivileges>
+                        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+                    </requestedPrivileges>
+                </security>
+            </trustInfo>
+            </assembly>
+            "#,
+        );
+        res.compile().unwrap();
+    }
 
     println!("cargo:rerun-if-changed=kcp/ikcp.h");
     let mut builder = bindgen::Builder::default();

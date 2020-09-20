@@ -1,5 +1,5 @@
 [package]
-name = "nttp-rust"
+name = "ekho"
 version = "0.1.0"
 authors = ["alan20210202 <little_alanma@163.com>"]
 edition = "2018"
@@ -16,18 +16,25 @@ serde = { version = "1.0.115", features = ["derive"] }
 toml = "0.5.6"
 bytes = "0.5.6"
 pnet = "0.26.0"
-winapi = { version = "0.3.9", features = [ "winsock2", "ws2ipdef", "mstcpip", "iphlpapi", "heapapi", "ipmib", "ifdef" ] }
 log = "0.4.0"
-simple_logger = "1.9.0"
+dashmap = "3.11.10"
+env_logger = "0.7.1"
 once_cell = "1.4.1"
 lazy_static = "1.4.0"
+parking_lot = "0.11.0"
+priority-queue = "1.0.0"
 crossbeam-utils = "0.7.2"
 crossbeam-channel = "0.4.4"
+
+[dependencies.winapi]
+version = "0.3.9"
+features = [ "winsock2", "ws2ipdef", "mstcpip", "iphlpapi", "heapapi", "ipmib", "ifdef", "ntdef" ]
 
 [build-dependencies]
 env_logger = "0.7.1"
 cc = "1.0.59"
 bindgen = "0.55.1"
+winres = "0.1.11"
 
 
 

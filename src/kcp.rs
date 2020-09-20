@@ -6,16 +6,19 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+use crate::config::get_config;
 use bytes::{Bytes, BytesMut};
 use crossbeam_channel::Sender;
+use dashmap::DashMap;
 use lazy_static::lazy_static;
-use once_cell::sync::OnceCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use parking_lot::Mutex;
+use priority_queue::PriorityQueue;
+use std::cmp::Reverse;
 use std::hash::{Hash, Hasher};
-use std::io::{Error, ErrorKind, Read, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::os::raw::{c_char, c_int, c_long, c_void};
 use std::ptr::slice_from_raw_parts;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +32,7 @@ unsafe extern "C" fn output_callback(
     kcp: *mut ikcpcb,
     user: *mut c_void,
 ) -> c_int {
-    let obj = user as *mut KCPControlBlock;
+    let obj = user as *mut KcpControlBlock;
     assert_ne!(obj, std::ptr::null_mut());
     assert_eq!(kcp, (*obj).inner);
     let bytes = Bytes::copy_from_slice(&*slice_from_raw_parts(buf as *const u8, len as usize));
@@ -43,32 +46,32 @@ pub fn get_conv(block: &[u8]) -> u32 {
 
 /// A thin wrapper above KCP
 #[derive(Debug)]
-pub struct KCPControlBlock {
+pub struct KcpControlBlock {
     inner: *mut ikcpcb,
     sender: Sender<Bytes>,
 }
 
-unsafe impl Send for KCPControlBlock {}
+unsafe impl Send for KcpControlBlock {}
 
-unsafe impl Sync for KCPControlBlock {}
+unsafe impl Sync for KcpControlBlock {}
 
-impl KCPControlBlock {
-    pub fn new_with_sender(conv: u32, sender: Sender<Bytes>) -> Box<KCPControlBlock> {
-        let mut ret = Box::new(KCPControlBlock {
+impl KcpControlBlock {
+    pub fn new_with_sender(conv: u32, sender: Sender<Bytes>) -> Box<KcpControlBlock> {
+        let mut ret = Box::new(KcpControlBlock {
             inner: std::ptr::null_mut(),
             sender,
         });
         ret.inner = unsafe {
             ikcp_create(
                 conv as IUINT32,
-                &mut *ret as *mut KCPControlBlock as *mut c_void,
+                &mut *ret as *mut KcpControlBlock as *mut c_void,
             )
         };
         unsafe { ikcp_setoutput(ret.inner, Some(output_callback)) };
         ret
     }
 
-    pub fn new(conv: u32) -> Box<KCPControlBlock> {
+    pub fn new(conv: u32) -> Box<KcpControlBlock> {
         Self::new_with_sender(conv, crate::icmp::get_sender())
     }
 
@@ -145,7 +148,7 @@ impl KCPControlBlock {
     }
 }
 
-impl Drop for KCPControlBlock {
+impl Drop for KcpControlBlock {
     fn drop(&mut self) {
         unsafe { ikcp_release(self.inner) };
     }
@@ -156,83 +159,53 @@ impl Drop for KCPControlBlock {
 //==================================================================================================
 
 #[derive(Debug, Clone)]
-struct KCPSchedulerRef(Arc<Mutex<Box<KCPControlBlock>>>);
+struct KcpSchedulerItem(Arc<Mutex<Box<KcpControlBlock>>>);
 
-impl Eq for KCPSchedulerRef {}
+impl Eq for KcpSchedulerItem {}
 
-impl PartialEq for KCPSchedulerRef {
+impl PartialEq for KcpSchedulerItem {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-impl Hash for KCPSchedulerRef {
+impl Hash for KcpSchedulerItem {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Arc::as_ptr(&self.0).hash(state);
     }
 }
 
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_millis(5);
 lazy_static! {
-    /// Maintain an ordered surjection from KCP control blocks to their next update time
-    static ref UPDATE_SCHEDULE: Mutex<(
-        BTreeMap<u32, HashSet<KCPSchedulerRef>>,
-        HashMap<KCPSchedulerRef, u32>,
-    )> = Default::default();
+    static ref UPDATE_SCHEDULE: Mutex<PriorityQueue<KcpSchedulerItem, Reverse<u32>>> =
+        Mutex::new(PriorityQueue::new());
 }
 
-fn schedule_update_internal(
-    target: Arc<Mutex<Box<KCPControlBlock>>>,
-    time: u32,
-    time_to_updates: &mut BTreeMap<u32, HashSet<KCPSchedulerRef>>,
-    update_to_time: &mut HashMap<KCPSchedulerRef, u32>,
-) {
-    let key = KCPSchedulerRef(target);
-    // If its update has already been scheduled, then remove that scheduled update
-    if let Some(prev) = update_to_time.get(&key) {
-        time_to_updates.get_mut(prev).unwrap().remove(&key);
-        if time_to_updates.get(prev).unwrap().is_empty() {
-            time_to_updates.remove(prev);
-        }
-    }
-    time_to_updates.entry(time).or_default().insert(key.clone());
-    update_to_time.insert(key, time);
+pub fn schedule_immediate_update(target: Arc<Mutex<Box<KcpControlBlock>>>) {
+    let mut guard = UPDATE_SCHEDULE.lock();
+    guard.push_increase(KcpSchedulerItem(target), Reverse(0));
 }
 
-pub fn schedule_immediate_update(target: Arc<Mutex<Box<KCPControlBlock>>>) {
-    let mut guard = UPDATE_SCHEDULE.lock().unwrap();
-    let (time_to_updates, update_to_time) = &mut *guard;
-    schedule_update_internal(target, 0, time_to_updates, update_to_time);
-}
-
-pub fn init_kcp_update_thread() {
+pub fn init_kcp_scheduler() {
+    let interval = get_config().kcp.scheduler_interval;
     thread::spawn(|| loop {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u32;
-        let mut to_be_updated = vec![];
         {
-            let mut guard = UPDATE_SCHEDULE.lock().unwrap();
-            let (time_to_updates, update_to_time) = &mut *guard;
-            for (&time, updates) in time_to_updates.iter() {
-                if time > now {
-                    break;
-                }
-                to_be_updated.extend(updates.iter().cloned());
-            }
-            for update in to_be_updated {
-                let mut kcp = update.0.lock().unwrap();
+            let mut guard = UPDATE_SCHEDULE.lock();
+            while guard
+                .peek()
+                .map(|item| *item.1 >= Reverse(now))
+                .unwrap_or(false)
+            {
+                let (update, _) = guard.pop().unwrap();
+                let mut kcp = update.0.lock();
                 kcp.update(now);
-                schedule_update_internal(
-                    update.0.clone(),
-                    kcp.check(now),
-                    time_to_updates,
-                    update_to_time,
-                );
+                guard.push(KcpSchedulerItem(update.0.clone()), Reverse(kcp.check(now)));
             }
         }
-        thread::sleep(UPDATE_CHECK_INTERVAL);
+        thread::sleep(Duration::from_millis(interval as u64));
     });
 }
 
@@ -240,42 +213,33 @@ pub fn init_kcp_update_thread() {
 //                                    Connection Management
 //==================================================================================================
 
-#[derive(Copy, Clone, Debug)]
-struct KCPConfig {
-    nodelay: bool,
-    interval: u32,
-    resend: u32,
-    flow_control: bool,
-}
-
 lazy_static! {
-    static ref CONNECTION_STATE: Mutex<HashMap<u32, Arc<Mutex<Box<KCPControlBlock>>>>> =
-        Default::default();
+    static ref CONNECTION_STATE: DashMap<u32, Arc<Mutex<Box<KcpControlBlock>>>> = DashMap::new();
 }
 
-struct KCPConnection {
-    control: Arc<Mutex<Box<KCPControlBlock>>>,
+struct KcpConnection {
+    control: Arc<Mutex<Box<KcpControlBlock>>>,
 }
 
-impl KCPConnection {
-    pub fn new(conv: u32, config: KCPConfig) -> Result<KCPConnection> {
-        let mut state = CONNECTION_STATE.lock().unwrap();
-        if state.contains_key(&conv) {
+impl KcpConnection {
+    pub fn new(conv: u32) -> Result<KcpConnection> {
+        if CONNECTION_STATE.contains_key(&conv) {
             return Err(Error::from(ErrorKind::AddrInUse));
         }
-        let control = Arc::new(Mutex::new(KCPControlBlock::new(conv)));
-        control.lock().unwrap().set_nodelay(
+        let control = Arc::new(Mutex::new(KcpControlBlock::new(conv)));
+        let config = &get_config().kcp;
+        control.lock().set_nodelay(
             config.nodelay,
             config.interval,
             config.resend,
             !config.flow_control,
         );
-        state.insert(conv, control.clone());
-        Ok(KCPConnection { control })
+        CONNECTION_STATE.insert(conv, control.clone());
+        Ok(KcpConnection { control })
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
-        let ret = self.control.lock().unwrap().send(data);
+        let ret = self.control.lock().send(data);
         if ret < 0 {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -287,7 +251,7 @@ impl KCPConnection {
     }
 
     pub fn try_recv(&mut self) -> Option<Bytes> {
-        let mut control = self.control.lock().unwrap();
+        let mut control = self.control.lock();
         let size = control.peek_size();
         if size < 0 {
             None
@@ -299,18 +263,16 @@ impl KCPConnection {
     }
 }
 
-impl Drop for KCPConnection {
+impl Drop for KcpConnection {
     fn drop(&mut self) {
-        let mut state = CONNECTION_STATE.lock().unwrap();
-        state.remove(&self.control.lock().unwrap().conv());
+        CONNECTION_STATE.remove(&self.control.lock().conv());
     }
 }
 
 pub fn handle_kcp_packet(packet: &[u8]) {
-    let state = CONNECTION_STATE.lock().unwrap();
     let conv = get_conv(packet);
-    if let Some(control) = state.get(&conv) {
-        control.lock().unwrap().input(packet);
+    if let Some(control) = CONNECTION_STATE.get(&conv) {
+        control.lock().input(packet);
         schedule_immediate_update(control.clone());
     }
 }
