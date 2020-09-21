@@ -3,3 +3,4 @@
 /lib
 /legacy
 /Cargo.lock
+config.toml
