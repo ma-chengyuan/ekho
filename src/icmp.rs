@@ -19,12 +19,13 @@ use std::num::Wrapping;
 use std::time::Instant;
 
 const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
+pub type PacketInfo = (Ipv4Addr, u8, Bytes);
 lazy_static! {
-    static ref CHANNEL: (Sender<(Ipv4Addr, Bytes)>, Receiver<(Ipv4Addr, Bytes)>) =
+    static ref CHANNEL: (Sender<PacketInfo>, Receiver<PacketInfo>) =
         crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
 }
 
-pub fn get_sender() -> Sender<(Ipv4Addr, Bytes)> {
+pub fn get_sender() -> Sender<PacketInfo> {
     CHANNEL.0.clone()
 }
 
@@ -48,25 +49,22 @@ fn recv_loop(rx: &mut TransportReceiver) {
         match iter.next() {
             Ok((packet, addr)) => {
                 if let IpAddr::V4(ipv4) = addr {
-                    if (packet.get_icmp_type() == IcmpType(0)
-                        || packet.get_icmp_type() == IcmpType(8))
-                        && platform_specific::filter_local_ip(ipv4)
-                    {
-                        log::info!(
-                            "ICMP packet from {:?} {:?} {:?}",
-                            addr,
-                            packet.get_icmp_type(),
-                            packet.get_icmp_code()
-                        );
+                    if platform_specific::filter_local_ip(ipv4) {
                         let payload = packet.payload();
-                        if payload.len() >= 2 {
+                        if payload.len() >= 8 && payload[4..4 + 3] == MAGIC {
                             log::info!(
                                 "packet identifier: {}",
                                 u16::from_be_bytes([payload[0], payload[1]])
                             );
-                        }
-                        if payload.len() >= 8 && payload[4..4 + 3] == MAGIC {
-                            handle_kcp_packet(&payload[4 + 3 + 1..], ipv4);
+                            if packet.get_icmp_type() == IcmpType(0) {
+                                log::info!("received normal packet from {}", ipv4);
+                                // handle_kcp_packet(&payload[4 + 3 + 1..], ipv4);
+                            } else if packet.get_icmp_type() == IcmpType(8)
+                                && get_config().remote_ip.is_none()
+                            {
+                                CHANNEL.0.send((ipv4, 8, Bytes::new())).unwrap();
+                                log::info!("sent back reply message to {}", ipv4);
+                            }
                         }
                     }
                 }
@@ -76,7 +74,7 @@ fn recv_loop(rx: &mut TransportReceiver) {
     }
 }
 
-fn send_loop(tx: &mut TransportSender, input: Receiver<(Ipv4Addr, Bytes)>) {
+fn send_loop(tx: &mut TransportSender, input: Receiver<PacketInfo>) {
     const HEADER: usize = IcmpPacket::minimum_packet_size();
     let id = get_config().icmp.id;
     let mut buf = [0u8; 1500];
@@ -92,18 +90,19 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<(Ipv4Addr, Bytes)>) {
                 IpAddr::from(last_ip),
             )
         } else {
-            let (dest, block) = input.recv().expect("error receiving data");
+            let (dest, code, block) = input.recv().expect("error receiving data");
             if !heartbeats.contains_key(&dest)
                 || heartbeats[&dest].elapsed().as_secs()
                     > get_config().icmp.heartbeat_interval as u64
             {
                 // Send heartbeat packet to make NAT happy
-                let mut buf = [0u8; HEADER + 4];
+                let mut buf = [0u8; HEADER + 8];
                 let mut packet = MutableIcmpPacket::new(&mut buf).unwrap();
                 packet.set_icmp_type(IcmpType(8));
                 packet.set_icmp_code(IcmpCode(0));
                 let payload = packet.payload_mut();
                 payload[..2].copy_from_slice(&id.to_be_bytes());
+                payload[4..4 + 3].copy_from_slice(&MAGIC);
                 packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
                 loop {
                     match tx.send_to(IcmpPacket::new(&buf).unwrap(), IpAddr::from(dest)) {
@@ -123,7 +122,7 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<(Ipv4Addr, Bytes)>) {
             last_ip = dest;
             packet_len = HEADER + 4 /* conv */ + 3 /* magic number */ + 1 /* type */ + block.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..packet_len]).unwrap();
-            packet.set_icmp_type(IcmpType(0));
+            packet.set_icmp_type(IcmpType(code));
             packet.set_icmp_code(IcmpCode(0));
             let payload = packet.payload_mut();
             payload[..2].copy_from_slice(&id.to_be_bytes());

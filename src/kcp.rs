@@ -7,7 +7,7 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use crate::config::get_config;
-use crate::icmp::get_sender;
+use crate::icmp::{get_sender, PacketInfo};
 use bytes::{Buf, Bytes, BytesMut};
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
@@ -38,7 +38,7 @@ unsafe extern "C" fn output_callback(
     assert_ne!(obj, std::ptr::null_mut());
     assert_eq!(kcp, (*obj).inner);
     let bytes = Bytes::copy_from_slice(&*slice_from_raw_parts(buf as *const u8, len as usize));
-    (*obj).sender.send(((*obj).ip.unwrap(), bytes)).unwrap();
+    (*obj).sender.send(((*obj).ip.unwrap(), 0, bytes)).unwrap();
     len
 }
 
@@ -50,7 +50,7 @@ pub fn get_conv(block: &[u8]) -> u32 {
 #[derive(Debug)]
 pub struct KcpControlBlock {
     inner: *mut ikcpcb,
-    sender: Sender<(Ipv4Addr, Bytes)>,
+    sender: Sender<PacketInfo>,
     ip: Option<Ipv4Addr>,
 }
 

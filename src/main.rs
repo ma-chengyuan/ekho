@@ -4,6 +4,8 @@ mod kcp;
 
 use log::LevelFilter;
 use std::env;
+use crate::icmp::get_sender;
+use bytes::Bytes;
 
 fn main() {
     env_logger::Builder::new()
@@ -21,9 +23,11 @@ fn main() {
         Some(ip) => std::thread::spawn(move || {
             let mut connection =
                 kcp::KcpConnection::new_with_ip(config::get_config().conv, ip).unwrap();
+            let sender = get_sender();
             loop {
-                connection.send(&[1, 2, 3, 4, 5]).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                // connection.send(&[1, 2, 3, 4, 5]).unwrap();
+                sender.send((ip, 0, Bytes::new())).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }),
         None => std::thread::spawn(|| {
