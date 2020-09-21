@@ -1,4 +1,5 @@
 #![allow(clippy::cast_ptr_alignment)]
+#![allow(clippy::type_complexity)]
 
 use crate::config::get_config;
 use crate::kcp::handle_kcp_packet;
@@ -12,35 +13,37 @@ use pnet::transport::{
     icmp_packet_iter, transport_channel, TransportChannelType, TransportProtocol,
     TransportReceiver, TransportSender,
 };
-use std::net::IpAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
+use std::time::Instant;
 
 const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
 lazy_static! {
-    static ref CHANNEL: (Sender<Bytes>, Receiver<Bytes>) = crossbeam_channel::bounded(10);
+    static ref CHANNEL: (Sender<(Ipv4Addr, Bytes)>, Receiver<(Ipv4Addr, Bytes)>) =
+        crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
 }
 
-pub fn get_sender() -> Sender<Bytes> {
+pub fn get_sender() -> Sender<(Ipv4Addr, Bytes)> {
     CHANNEL.0.clone()
 }
 
 pub fn init_and_loop() {
     let (mut tx, mut rx) = transport_channel(
-        get_config().icmp.buffer_size,
+        get_config().icmp.recv_buffer_size,
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
     .expect("error creating transport channel");
     platform_specific::prepare_receiver(&rx);
     crossbeam_utils::thread::scope(|s| {
-        s.spawn(|_| receive_loop(&mut rx));
+        s.spawn(|_| recv_loop(&mut rx));
         s.spawn(|_| send_loop(&mut tx, CHANNEL.1.clone()));
     })
     .unwrap();
 }
 
-fn receive_loop(rx: &mut TransportReceiver) {
+fn recv_loop(rx: &mut TransportReceiver) {
     let mut iter = icmp_packet_iter(rx);
-    let id = get_config().icmp.id;
     loop {
         match iter.next() {
             Ok((packet, addr)) => {
@@ -53,10 +56,12 @@ fn receive_loop(rx: &mut TransportReceiver) {
                             packet.get_icmp_code()
                         );
                         let payload = packet.payload();
-                        if id == u16::from_be_bytes([payload[0], payload[1]])
-                            && payload[4..4 + 3] == MAGIC
-                        {
-                            handle_kcp_packet(&payload[4 + 3 + 1..]);
+                        if payload.len() >= 8 && payload[4..4 + 3] == MAGIC {
+                            log::info!(
+                                "packet identifier: {}",
+                                u16::from_be_bytes([payload[0], payload[1]])
+                            );
+                            handle_kcp_packet(&payload[4 + 3 + 1..], ipv4);
                         }
                     }
                 }
@@ -66,19 +71,51 @@ fn receive_loop(rx: &mut TransportReceiver) {
     }
 }
 
-fn send_loop(tx: &mut TransportSender, input: Receiver<Bytes>) {
+fn send_loop(tx: &mut TransportSender, input: Receiver<(Ipv4Addr, Bytes)>) {
     const HEADER: usize = IcmpPacket::minimum_packet_size();
-    let dest_ip = IpAddr::V4(get_config().dest_ip);
     let id = get_config().icmp.id;
     let mut buf = [0u8; 1500];
     let mut resend_last_packet = false;
+    let mut last_ip = Ipv4Addr::UNSPECIFIED;
     let mut packet_len = 0usize;
     let mut seq = 0u16;
+    let mut heartbeats: HashMap<Ipv4Addr, Instant> = HashMap::new();
     loop {
         let result = if resend_last_packet {
-            tx.send_to(IcmpPacket::new(&buf[..packet_len]).unwrap(), dest_ip)
+            tx.send_to(
+                IcmpPacket::new(&buf[..packet_len]).unwrap(),
+                IpAddr::from(last_ip),
+            )
         } else {
-            let block = input.recv().expect("error receiving data");
+            let (dest, block) = input.recv().expect("error receiving data");
+            if !heartbeats.contains_key(&dest)
+                || heartbeats[&dest].elapsed().as_secs()
+                    > get_config().icmp.heartbeat_interval as u64
+            {
+                // Send heartbeat packet to make NAT happy
+                let mut buf = [0u8; HEADER + 4];
+                let mut packet = MutableIcmpPacket::new(&mut buf).unwrap();
+                packet.set_icmp_type(IcmpType(8));
+                packet.set_icmp_code(IcmpCode(0));
+                let payload = packet.payload_mut();
+                payload[..2].copy_from_slice(&id.to_be_bytes());
+                packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
+                loop {
+                    match tx.send_to(IcmpPacket::new(&buf).unwrap(), IpAddr::from(dest)) {
+                        Ok(_) => break,
+                        Err(e) => match e.raw_os_error() {
+                            Some(105) => continue,
+                            _ => {
+                                log::error!("error sending heartbeat packet: {}", e);
+                                break;
+                            }
+                        },
+                    }
+                }
+                log::info!("sent heartbeat packet to {}", dest);
+                heartbeats.insert(dest, Instant::now());
+            }
+            last_ip = dest;
             packet_len = HEADER + 4 /* conv */ + 3 /* magic number */ + 1 /* type */ + block.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..packet_len]).unwrap();
             packet.set_icmp_type(IcmpType(0));
@@ -89,7 +126,8 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<Bytes>) {
             payload[4..4 + 3].copy_from_slice(&MAGIC);
             payload[4 + 3] = 0 /* RESERVED */;
             payload[4 + 3 + 1..].copy_from_slice(&block);
-            tx.send_to(packet.consume_to_immutable(), dest_ip)
+            packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
+            tx.send_to(packet.consume_to_immutable(), IpAddr::from(dest))
         };
         resend_last_packet = match result {
             Ok(_) => {

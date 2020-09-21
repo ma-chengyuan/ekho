@@ -1,4 +1,5 @@
-dest_ip = "192.168.100.32"
+remote_ip = "192.168.100.32"
+conv = 998244353
 
 # KCP layer configurations
 [kcp]
@@ -17,5 +18,9 @@ scheduler_interval = 5
 [icmp]
 # Identifier for ICMP echo packet
 id = 44353
-# (Optional) ICMP receive buffer size, default 4096
-buffer_size = 4096
+# (Optional) ICMP receive buffer size, default 4096 bytes
+recv_buffer_size = 4096
+# (Optional) ICMP send buffer size, default 10 packets
+send_buffer_size = 10
+# (Optional) ICMP heartbeat interval, default 10 seconds
+heartbeat_interval = 10

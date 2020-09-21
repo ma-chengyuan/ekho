@@ -7,8 +7,9 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use crate::config::get_config;
-use bytes::{Bytes, BytesMut};
-use crossbeam_channel::Sender;
+use crate::icmp::get_sender;
+use bytes::{Buf, Bytes, BytesMut};
+use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
@@ -16,6 +17,7 @@ use priority_queue::PriorityQueue;
 use std::cmp::Reverse;
 use std::hash::{Hash, Hasher};
 use std::io::{Error, ErrorKind, Result};
+use std::net::Ipv4Addr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 use std::ptr::slice_from_raw_parts;
 use std::sync::Arc;
@@ -36,7 +38,7 @@ unsafe extern "C" fn output_callback(
     assert_ne!(obj, std::ptr::null_mut());
     assert_eq!(kcp, (*obj).inner);
     let bytes = Bytes::copy_from_slice(&*slice_from_raw_parts(buf as *const u8, len as usize));
-    (*obj).sender.send(bytes).unwrap();
+    (*obj).sender.send(((*obj).ip.unwrap(), bytes)).unwrap();
     len
 }
 
@@ -48,7 +50,8 @@ pub fn get_conv(block: &[u8]) -> u32 {
 #[derive(Debug)]
 pub struct KcpControlBlock {
     inner: *mut ikcpcb,
-    sender: Sender<Bytes>,
+    sender: Sender<(Ipv4Addr, Bytes)>,
+    ip: Option<Ipv4Addr>,
 }
 
 unsafe impl Send for KcpControlBlock {}
@@ -56,10 +59,11 @@ unsafe impl Send for KcpControlBlock {}
 unsafe impl Sync for KcpControlBlock {}
 
 impl KcpControlBlock {
-    pub fn new_with_sender(conv: u32, sender: Sender<Bytes>) -> Box<KcpControlBlock> {
+    pub fn new(conv: u32) -> Box<KcpControlBlock> {
         let mut ret = Box::new(KcpControlBlock {
             inner: std::ptr::null_mut(),
-            sender,
+            sender: get_sender(),
+            ip: None,
         });
         ret.inner = unsafe {
             ikcp_create(
@@ -69,10 +73,6 @@ impl KcpControlBlock {
         };
         unsafe { ikcp_setoutput(ret.inner, Some(output_callback)) };
         ret
-    }
-
-    pub fn new(conv: u32) -> Box<KcpControlBlock> {
-        Self::new_with_sender(conv, crate::icmp::get_sender())
     }
 
     pub fn conv(&self) -> u32 {
@@ -187,7 +187,7 @@ pub fn schedule_immediate_update(target: Arc<Mutex<Box<KcpControlBlock>>>) {
 
 pub fn init_kcp_scheduler() {
     let interval = get_config().kcp.scheduler_interval;
-    thread::spawn(|| loop {
+    thread::spawn(move || loop {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -214,11 +214,17 @@ pub fn init_kcp_scheduler() {
 //==================================================================================================
 
 lazy_static! {
-    static ref CONNECTION_STATE: DashMap<u32, Arc<Mutex<Box<KcpControlBlock>>>> = DashMap::new();
+    static ref CONNECTION_STATE: DashMap<u32, KcpConnectionState> = DashMap::new();
 }
 
-struct KcpConnection {
+struct KcpConnectionState {
     control: Arc<Mutex<Box<KcpControlBlock>>>,
+    sender: Sender<Bytes>,
+}
+
+pub struct KcpConnection {
+    control: Arc<Mutex<Box<KcpControlBlock>>>,
+    receiver: Receiver<Bytes>,
 }
 
 impl KcpConnection {
@@ -234,8 +240,21 @@ impl KcpConnection {
             config.resend,
             !config.flow_control,
         );
-        CONNECTION_STATE.insert(conv, control.clone());
-        Ok(KcpConnection { control })
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        CONNECTION_STATE.insert(
+            conv,
+            KcpConnectionState {
+                control: control.clone(),
+                sender,
+            },
+        );
+        Ok(KcpConnection { control, receiver })
+    }
+
+    pub fn new_with_ip(conv: u32, ip: Ipv4Addr) -> Result<Self> {
+        let ret = Self::new(conv)?;
+        ret.control.lock().ip = Some(ip);
+        Ok(ret)
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
@@ -250,16 +269,8 @@ impl KcpConnection {
         Ok(())
     }
 
-    pub fn try_recv(&mut self) -> Option<Bytes> {
-        let mut control = self.control.lock();
-        let size = control.peek_size();
-        if size < 0 {
-            None
-        } else {
-            let mut ret = BytesMut::with_capacity(size as usize);
-            control.recv(ret.as_mut());
-            Some(Bytes::from(ret))
-        }
+    pub fn recv(&mut self) -> Bytes {
+        self.receiver.recv().unwrap()
     }
 }
 
@@ -269,10 +280,27 @@ impl Drop for KcpConnection {
     }
 }
 
-pub fn handle_kcp_packet(packet: &[u8]) {
+pub fn handle_kcp_packet(packet: &[u8], from: Ipv4Addr) {
     let conv = get_conv(packet);
-    if let Some(control) = CONNECTION_STATE.get(&conv) {
-        control.lock().input(packet);
-        schedule_immediate_update(control.clone());
+    if let Some(connection) = CONNECTION_STATE.get(&conv) {
+        {
+            let mut kcp = connection.control.lock();
+            if kcp.ip.is_none() {
+                kcp.ip = Some(from)
+            } else if kcp.ip.unwrap() == from {
+                return;
+            }
+            kcp.input(packet);
+            let mut len;
+            while {
+                len = kcp.peek_size();
+                len >= 0
+            } {
+                let mut buf = BytesMut::with_capacity(len as usize);
+                assert_eq!(kcp.recv(&mut buf), len);
+                connection.sender.send(buf.to_bytes()).unwrap();
+            }
+        }
+        schedule_immediate_update(connection.control.clone());
     }
 }
