@@ -48,7 +48,9 @@ fn recv_loop(rx: &mut TransportReceiver) {
         match iter.next() {
             Ok((packet, addr)) => {
                 if let IpAddr::V4(ipv4) = addr {
-                    if platform_specific::filter_local_ip(ipv4) {
+                    if packet.get_icmp_type() == IcmpType(0)
+                        && platform_specific::filter_local_ip(ipv4)
+                    {
                         log::info!(
                             "ICMP packet from {:?} {:?} {:?}",
                             addr,
@@ -276,7 +278,7 @@ mod platform_specific {
 
     pub fn prepare_receiver(_tx: &TransportReceiver) {}
 
-    pub fn filter_local_ip(addr: Ipv4Addr) -> bool {
+    pub fn filter_local_ip(_addr: Ipv4Addr) -> bool {
         true
     }
 }
