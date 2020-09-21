@@ -48,8 +48,8 @@ fn recv_loop(rx: &mut TransportReceiver) {
         match iter.next() {
             Ok((packet, addr)) => {
                 if let IpAddr::V4(ipv4) = addr {
-                    if packet.get_icmp_type() == IcmpType(0)
-                        || packet.get_icmp_type() == IcmpType(8)
+                    if (packet.get_icmp_type() == IcmpType(0)
+                        || packet.get_icmp_type() == IcmpType(8))
                         && platform_specific::filter_local_ip(ipv4)
                     {
                         log::info!(
@@ -59,11 +59,13 @@ fn recv_loop(rx: &mut TransportReceiver) {
                             packet.get_icmp_code()
                         );
                         let payload = packet.payload();
-                        if payload.len() >= 8 && payload[4..4 + 3] == MAGIC {
+                        if payload.len() >= 2 {
                             log::info!(
                                 "packet identifier: {}",
                                 u16::from_be_bytes([payload[0], payload[1]])
                             );
+                        }
+                        if payload.len() >= 8 && payload[4..4 + 3] == MAGIC {
                             handle_kcp_packet(&payload[4 + 3 + 1..], ipv4);
                         }
                     }
