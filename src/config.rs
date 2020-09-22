@@ -1,12 +1,12 @@
+use crate::icmp::Endpoint;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
 use std::path::Path;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Config {
     #[serde(default)]
-    pub remote_ip: Option<Ipv4Addr>,
+    pub remote_ip: Option<Endpoint>,
     pub conv: u32,
 
     pub kcp: KcpConfig,

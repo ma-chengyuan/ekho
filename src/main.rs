@@ -12,7 +12,7 @@ fn test_kcp() {
     use std::time::Duration;
     match get_config().remote_ip {
         Some(ip) => thread::spawn(move || {
-            let mut connection = KcpConnection::new_with_ip(get_config().conv, ip).unwrap();
+            let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
             loop {
                 connection.send(&[2, 3, 3, 3, 3]).unwrap();
                 thread::sleep(Duration::from_millis(200));

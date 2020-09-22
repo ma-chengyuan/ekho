@@ -7,7 +7,7 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use crate::config::get_config;
-use crate::icmp::{get_sender, PacketInfo};
+use crate::icmp::{get_sender, Endpoint, PacketInfo};
 use bytes::{Buf, Bytes, BytesMut};
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
@@ -17,7 +17,6 @@ use priority_queue::PriorityQueue;
 use std::cmp::Reverse;
 use std::hash::{Hash, Hasher};
 use std::io::{Error, ErrorKind, Result};
-use std::net::Ipv4Addr;
 use std::os::raw::{c_char, c_int, c_long, c_void};
 use std::ptr::slice_from_raw_parts;
 use std::sync::Arc;
@@ -38,7 +37,10 @@ unsafe extern "C" fn output_callback(
     assert_ne!(obj, std::ptr::null_mut());
     assert_eq!(kcp, (*obj).inner);
     let bytes = Bytes::copy_from_slice(&*slice_from_raw_parts(buf as *const u8, len as usize));
-    (*obj).sender.send(((*obj).ip.unwrap(), bytes)).unwrap();
+    (*obj)
+        .sender
+        .send(((*obj).endpoint.unwrap(), bytes))
+        .unwrap();
     len
 }
 
@@ -51,7 +53,8 @@ pub fn get_conv(block: &[u8]) -> u32 {
 pub struct KcpControlBlock {
     inner: *mut ikcpcb,
     sender: Sender<PacketInfo>,
-    ip: Option<Ipv4Addr>,
+    /// The endpoint of the other side
+    endpoint: Option<Endpoint>,
 }
 
 unsafe impl Send for KcpControlBlock {}
@@ -63,7 +66,7 @@ impl KcpControlBlock {
         let mut ret = Box::new(KcpControlBlock {
             inner: std::ptr::null_mut(),
             sender: get_sender(),
-            ip: None,
+            endpoint: None,
         });
         ret.inner = unsafe {
             ikcp_create(
@@ -251,9 +254,9 @@ impl KcpConnection {
         Ok(KcpConnection { control, receiver })
     }
 
-    pub fn new_with_ip(conv: u32, ip: Ipv4Addr) -> Result<Self> {
+    pub fn with_endpoint(conv: u32, endpoint: Endpoint) -> Result<Self> {
         let ret = Self::new(conv)?;
-        ret.control.lock().ip = Some(ip);
+        ret.control.lock().endpoint = Some(endpoint);
         Ok(ret)
     }
 
@@ -280,14 +283,15 @@ impl Drop for KcpConnection {
     }
 }
 
-pub fn handle_kcp_packet(packet: &[u8], from: Ipv4Addr) {
+pub fn handle_kcp_packet(packet: &[u8], from: Endpoint) {
     let conv = get_conv(packet);
     if let Some(connection) = CONNECTION_STATE.get(&conv) {
         {
             let mut kcp = connection.control.lock();
-            if kcp.ip.is_none() {
-                kcp.ip = Some(from)
-            } else if kcp.ip.unwrap() != from {
+            if kcp.endpoint.is_none() {
+                log::info!("Kcp connection {} is bound to {:?}", kcp.conv(), from);
+                kcp.endpoint = Some(from)
+            } else if kcp.endpoint.unwrap() != from {
                 return;
             }
             kcp.input(packet);

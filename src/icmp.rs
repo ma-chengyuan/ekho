@@ -6,18 +6,28 @@ use crate::kcp::handle_kcp_packet;
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
-use pnet::packet::icmp::{IcmpCode, IcmpPacket, IcmpType, IcmpTypes, MutableIcmpPacket};
+use pnet::packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::{MutablePacket, Packet};
 use pnet::transport::{
     icmp_packet_iter, transport_channel, TransportChannelType, TransportProtocol,
     TransportReceiver, TransportSender,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
 
 const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
-pub type PacketInfo = (Ipv4Addr, Bytes);
+
+#[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct Endpoint {
+    pub ip: Ipv4Addr,
+    pub id: u16,
+}
+
+pub type PacketInfo = (Endpoint, Bytes);
 lazy_static! {
     static ref CHANNEL: (Sender<PacketInfo>, Receiver<PacketInfo>) =
         crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
@@ -54,7 +64,13 @@ fn recv_loop(rx: &mut TransportReceiver) {
                             && payload.len() >= 8
                             && payload[4..7] == MAGIC
                         {
-                            handle_kcp_packet(&payload[8..], ipv4);
+                            handle_kcp_packet(
+                                &payload[8..],
+                                Endpoint {
+                                    ip: ipv4,
+                                    id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
+                                },
+                            );
                         }
                     }
                 }
@@ -68,39 +84,41 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketInfo>) {
     const HEADER: usize = IcmpPacket::minimum_packet_size();
     let mut buf = [0u8; 1500];
     let mut resend_last_packet = false;
-    let mut last_ip = Ipv4Addr::UNSPECIFIED;
     let mut packet_len = 0usize;
-    let mut seq = 0u16;
-    let id = get_config().icmp.id;
+    let mut seq: HashMap<Endpoint, u16> = HashMap::new();
     let code = match get_config().remote_ip {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
+    };
+    let mut last_endpoint = Endpoint {
+        ip: Ipv4Addr::UNSPECIFIED,
+        id: 0,
     };
     loop {
         let result = if resend_last_packet {
             tx.send_to(
                 IcmpPacket::new(&buf[..packet_len]).unwrap(),
-                IpAddr::from(last_ip),
+                IpAddr::from(last_endpoint.ip),
             )
         } else {
-            let (dest, block) = input.recv().expect("error receiving data");
-            last_ip = dest;
+            let (endpoint, block) = input.recv().expect("error receiving data");
             packet_len = HEADER + 4 /* conv */ + 3 /* magic number */ + 1 /* type */ + block.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..packet_len]).unwrap();
             packet.set_icmp_type(code);
-            packet.set_icmp_code(IcmpCode(0));
             let payload = packet.payload_mut();
-            payload[0..2].copy_from_slice(&id.to_be_bytes());
-            payload[2..4].copy_from_slice(&seq.to_be_bytes());
+            payload[0..2].copy_from_slice(&endpoint.id.to_be_bytes());
+            payload[2..4].copy_from_slice(&seq.entry(endpoint).or_insert(0).to_be_bytes());
             payload[4..7].copy_from_slice(&MAGIC);
             payload[7] = 0 /* RESERVED */;
             payload[8..].copy_from_slice(&block);
             packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
-            tx.send_to(packet.consume_to_immutable(), IpAddr::from(dest))
+            last_endpoint = endpoint;
+            tx.send_to(packet.consume_to_immutable(), IpAddr::from(endpoint.ip))
         };
         resend_last_packet = match result {
             Ok(_) => {
-                seq = (Wrapping(seq) + Wrapping(1)).0;
+                seq.entry(last_endpoint)
+                    .and_modify(|s| *s = (Wrapping(*s) + Wrapping(1)).0);
                 false
             }
             Err(e) => match e.raw_os_error() {
