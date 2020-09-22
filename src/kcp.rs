@@ -2,6 +2,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(dead_code)]
+#![allow(improper_ctypes)]
 #![allow(clippy::type_complexity)]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -236,13 +237,17 @@ impl KcpConnection {
             return Err(Error::from(ErrorKind::AddrInUse));
         }
         let control = Arc::new(Mutex::new(KcpControlBlock::new(conv)));
-        let config = &get_config().kcp;
-        control.lock().set_nodelay(
-            config.nodelay,
-            config.interval,
-            config.resend,
-            !config.flow_control,
-        );
+        {
+            let config = &get_config().kcp;
+            let mut kcp = control.lock();
+            kcp.set_mtu(config.mtu);
+            kcp.set_nodelay(
+                config.nodelay,
+                config.interval,
+                config.resend,
+                !config.flow_control,
+            );
+        }
         let (sender, receiver) = crossbeam_channel::unbounded();
         CONNECTION_STATE.insert(
             conv,

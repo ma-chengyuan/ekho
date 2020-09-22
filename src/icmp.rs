@@ -86,7 +86,7 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketInfo>) {
     let mut resend_last_packet = false;
     let mut packet_len = 0usize;
     let mut seq: HashMap<Endpoint, u16> = HashMap::new();
-    let code = match get_config().remote_ip {
+    let code = match get_config().remote {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
     };

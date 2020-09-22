@@ -9,20 +9,26 @@ fn test_kcp() {
     use crate::config::get_config;
     use crate::kcp::KcpConnection;
     use std::thread;
-    use std::time::Duration;
-    match get_config().remote_ip {
+    // use std::time::Duration;
+    use std::convert::TryInto;
+    match get_config().remote {
         Some(ip) => thread::spawn(move || {
             let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
+            let mut buf = [0u8; 128];
+            let mut packet_id = 0u32;
             loop {
-                connection.send(&[2, 3, 3, 3, 3]).unwrap();
-                thread::sleep(Duration::from_millis(200));
+                packet_id += 1;
+                buf[..4].copy_from_slice(&packet_id.to_be_bytes());
+                connection.send(&buf).unwrap();
+                log::info!("sent packet {:?}", packet_id);
             }
         }),
         None => thread::spawn(|| {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
             loop {
                 let recv = connection.recv();
-                log::info!("received {:?}", recv);
+                let id = u32::from_be_bytes(recv[..4].try_into().unwrap());
+                log::info!("received packet {:?}", id);
             }
         }),
     };
