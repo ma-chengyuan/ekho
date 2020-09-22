@@ -14,7 +14,7 @@ fn test_kcp() {
         Some(ip) => thread::spawn(move || {
             let mut connection = KcpConnection::new_with_ip(get_config().conv, ip).unwrap();
             loop {
-                connection.send(&[2, 3, 3, 3, 3]);
+                connection.send(&[2, 3, 3, 3, 3]).unwrap();
                 thread::sleep(Duration::from_millis(200));
             }
         }),
