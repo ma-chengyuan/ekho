@@ -287,7 +287,7 @@ pub fn handle_kcp_packet(packet: &[u8], from: Ipv4Addr) {
             let mut kcp = connection.control.lock();
             if kcp.ip.is_none() {
                 kcp.ip = Some(from)
-            } else if kcp.ip.unwrap() == from {
+            } else if kcp.ip.unwrap() != from {
                 return;
             }
             kcp.input(packet);
@@ -297,7 +297,7 @@ pub fn handle_kcp_packet(packet: &[u8], from: Ipv4Addr) {
                 len >= 0
             } {
                 let mut buf = BytesMut::with_capacity(len as usize);
-                log::info!("expected size: {}", len);
+                unsafe { buf.set_len(len as usize) };
                 assert_eq!(kcp.recv(&mut buf), len);
                 connection.sender.send(buf.to_bytes()).unwrap();
             }
