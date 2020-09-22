@@ -4,8 +4,29 @@ mod kcp;
 
 use log::LevelFilter;
 use std::env;
-use crate::icmp::get_sender;
-use bytes::Bytes;
+
+fn test_kcp() {
+    use crate::config::get_config;
+    use crate::kcp::KcpConnection;
+    use std::thread;
+    use std::time::Duration;
+    match get_config().remote_ip {
+        Some(ip) => thread::spawn(move || {
+            let mut connection = KcpConnection::new_with_ip(get_config().conv, ip).unwrap();
+            loop {
+                connection.send(&[2, 3, 3, 3, 3]);
+                thread::sleep(Duration::from_millis(200));
+            }
+        }),
+        None => thread::spawn(|| {
+            let mut connection = KcpConnection::new(get_config().conv).unwrap();
+            loop {
+                let recv = connection.recv();
+                log::info!("received {:?}", recv);
+            }
+        }),
+    };
+}
 
 fn main() {
     env_logger::Builder::new()
@@ -19,24 +40,6 @@ fn main() {
 
     config::load_config_from_file(config_path);
     kcp::init_kcp_scheduler();
-    match config::get_config().remote_ip {
-        Some(ip) => std::thread::spawn(move || {
-            let mut connection =
-                kcp::KcpConnection::new_with_ip(config::get_config().conv, ip).unwrap();
-            let sender = get_sender();
-            loop {
-                // connection.send(&[1, 2, 3, 4, 5]).unwrap();
-                sender.send((ip, 0, Bytes::new())).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-        }),
-        None => std::thread::spawn(|| {
-            let mut connection = kcp::KcpConnection::new(config::get_config().conv).unwrap();
-            loop {
-                let bytes = connection.recv();
-                log::info!("recieived bytes: {:?}", bytes);
-            }
-        }),
-    };
+    test_kcp();
     icmp::init_and_loop();
 }

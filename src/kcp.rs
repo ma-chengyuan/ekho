@@ -38,7 +38,7 @@ unsafe extern "C" fn output_callback(
     assert_ne!(obj, std::ptr::null_mut());
     assert_eq!(kcp, (*obj).inner);
     let bytes = Bytes::copy_from_slice(&*slice_from_raw_parts(buf as *const u8, len as usize));
-    (*obj).sender.send(((*obj).ip.unwrap(), 0, bytes)).unwrap();
+    (*obj).sender.send(((*obj).ip.unwrap(), bytes)).unwrap();
     len
 }
 
