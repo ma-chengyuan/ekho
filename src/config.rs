@@ -20,7 +20,7 @@ pub struct KcpConfig {
     pub interval: u32,
     pub resend: u32,
     pub flow_control: bool,
-    #[serde(default = "default_kcp_update_interval")]
+    #[serde(default = "default_kcp_scheduler_interval")]
     pub scheduler_interval: u32,
     #[serde(default = "default_kcp_send_window_size")]
     pub send_window_size: u32,
@@ -43,11 +43,11 @@ const fn default_icmp_recv_buffer_size() -> usize {
 }
 
 const fn default_icmp_send_buffer_size() -> usize {
-    10
+    32
 }
 
-const fn default_kcp_update_interval() -> u32 {
-    5
+const fn default_kcp_scheduler_interval() -> u32 {
+    500
 }
 
 const fn default_kcp_send_window_size() -> u32 {
@@ -55,7 +55,7 @@ const fn default_kcp_send_window_size() -> u32 {
 }
 
 const fn default_kcp_recv_window_size() -> u32 {
-    32
+    1024
 }
 
 pub fn get_config() -> &'static Config {

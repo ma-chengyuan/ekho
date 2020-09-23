@@ -212,7 +212,7 @@ pub fn init_kcp_scheduler() {
             }
         }
 
-        thread::sleep(Duration::from_millis(interval as u64));
+        thread::sleep(Duration::from_micros(interval as u64));
     });
 }
 
@@ -261,7 +261,7 @@ impl KcpConnection {
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
         {
             let mut kcp = self.control.0.lock();
-            let max_send = get_config().kcp.send_window_size * 2;
+            let max_send = get_config().kcp.send_window_size;
             while kcp.wait_send() > max_send {
                 self.control.1.wait(&mut kcp);
             }
