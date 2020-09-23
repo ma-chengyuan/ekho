@@ -309,7 +309,9 @@ impl KcpConnection {
 impl Drop for KcpConnection {
     fn drop(&mut self) {
         self.flush();
-        CONNECTION_STATE.remove(&self.control.0.lock().conv());
+        let mut kcp = self.control.0.lock();
+        CONNECTION_STATE.remove(&kcp.conv());
+        kcp.endpoint = None;
         log::info!("connection closed");
     }
 }
