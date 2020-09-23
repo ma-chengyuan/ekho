@@ -30,6 +30,7 @@ fn test_kcp() {
             let mut file = File::create("sample.json").unwrap();
             loop {
                 let recv = connection.recv();
+                log::info!("receive {}", recv.len());
                 if recv.is_empty() {
                     log::info!("receive complete");
                     break;
