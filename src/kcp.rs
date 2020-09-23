@@ -118,15 +118,16 @@ impl KcpControlBlock {
     }
 
     pub fn set_nodelay(&mut self, nodelay: bool, interval: u32, resend: u32, nc: bool) {
-        let _ = unsafe {
+        unsafe {
             ikcp_nodelay(
                 self.inner,
                 nodelay as c_int,
                 interval as c_int,
                 resend as c_int,
                 nc as c_int,
-            )
-        };
+            );
+            (*self.inner).interval = interval as u32;
+        }
     }
 
     pub fn send(&mut self, data: &[u8]) -> i32 {

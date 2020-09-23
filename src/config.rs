@@ -51,11 +51,11 @@ const fn default_kcp_scheduler_interval() -> u32 {
 }
 
 const fn default_kcp_send_window_size() -> u32 {
-    1024
+    2048
 }
 
 const fn default_kcp_recv_window_size() -> u32 {
-    1024
+    2048
 }
 
 pub fn get_config() -> &'static Config {
