@@ -9,14 +9,11 @@ use std::io::{Write, Read};
 fn test_kcp() {
     use crate::config::get_config;
     use crate::kcp::KcpConnection;
-    use std::convert::TryInto;
     use std::thread;
     use std::fs::File;
     match get_config().remote {
         Some(ip) => thread::spawn(move || {
             let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
-            connection.send(&[]).unwrap();
-            /*
             let mut file = File::open("sample.mp4").unwrap();
             let mut buf = [0u8; 480];
             loop {
@@ -26,13 +23,9 @@ fn test_kcp() {
                     break;
                 }
             }
-             */
         }),
         None => thread::spawn(|| {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
-            let recv = connection.recv();
-            log::info!("received: {}", recv.len());
-            /*
             let mut file = File::create("sample.mp4").unwrap();
             loop {
                 let recv = connection.recv();
@@ -42,7 +35,6 @@ fn test_kcp() {
                 }
                 file.write_all(&recv).unwrap();
             }
-             */
         }),
     };
 }

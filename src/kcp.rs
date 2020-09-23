@@ -148,6 +148,12 @@ impl KcpControlBlock {
             ) as i32
         }
     }
+
+    pub fn flush(&mut self) {
+        unsafe {
+            ikcp_flush(self.inner);
+        }
+    }
 }
 
 impl Drop for KcpControlBlock {
@@ -210,6 +216,7 @@ pub fn init_kcp_scheduler() {
                 guard.push(KcpSchedulerItem(update.0.clone()), Reverse(next_update));
                 (update.0).1.notify_all();
             }
+
         }
 
         thread::sleep(Duration::from_micros(interval as u64));
@@ -221,10 +228,9 @@ pub fn init_kcp_scheduler() {
 //==================================================================================================
 
 lazy_static! {
-    static ref CONNECTION_STATE: DashMap<u32, KcpConnection> = DashMap::new();
+    static ref CONNECTION_STATE: DashMap<u32, SyncKcpControlWithCondvar> = DashMap::new();
 }
 
-#[derive(Clone)]
 pub struct KcpConnection {
     control: SyncKcpControlWithCondvar,
 }
@@ -247,9 +253,8 @@ impl KcpConnection {
                 !config.flow_control,
             );
         }
-        let ret = KcpConnection { control };
-        CONNECTION_STATE.insert(conv, ret.clone());
-        Ok(ret)
+        CONNECTION_STATE.insert(conv, control.clone());
+        Ok(KcpConnection { control })
     }
 
     pub fn with_endpoint(conv: u32, endpoint: Endpoint) -> Result<Self> {
@@ -286,10 +291,16 @@ impl KcpConnection {
         kcp.recv(&mut buf);
         buf.to_bytes()
     }
+
+    pub fn flush(&mut self) {
+        let mut kcp = self.control.0.lock();
+        kcp.flush();
+    }
 }
 
 impl Drop for KcpConnection {
     fn drop(&mut self) {
+        self.flush();
         CONNECTION_STATE.remove(&self.control.0.lock().conv());
     }
 }
@@ -298,12 +309,12 @@ pub fn handle_kcp_packet(packet: &[u8], from: Endpoint) {
     let conv = get_conv(packet);
     if let Some(connection) = CONNECTION_STATE.get(&conv) {
         {
-            let mut kcp = connection.control.0.lock();
+            let mut kcp = connection.0.lock();
             if *kcp.endpoint.get_or_insert(from) == from {
                 kcp.input(packet);
-                connection.control.1.notify_all();
+                connection.1.notify_all();
             }
         }
-        schedule_immediate_update(connection.control.clone());
+        schedule_immediate_update(connection.clone());
     }
 }
