@@ -28,9 +28,11 @@ fn test_kcp() {
         None => thread::spawn(|| {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
             let mut file = File::create("sample.json").unwrap();
+            let mut total = 0;
             loop {
                 let recv = connection.recv();
-                log::info!("receive {}", recv.len());
+                total += recv.len();
+                log::info!("receive {} {}", recv.len(), total);
                 if recv.is_empty() {
                     log::info!("receive complete");
                     break;
