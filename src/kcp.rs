@@ -160,6 +160,7 @@ impl KcpControlBlock {
 impl Drop for KcpControlBlock {
     fn drop(&mut self) {
         unsafe { ikcp_release(self.inner) };
+        log::info!("block dropped");
     }
 }
 
@@ -213,8 +214,10 @@ pub fn init_kcp_scheduler() {
                 let (update, _) = guard.pop().unwrap();
                 let mut kcp = (update.0).0.lock();
                 kcp.update(now);
-                let next_update = std::cmp::max(kcp.check(now), now + 1);
-                guard.push(KcpSchedulerItem(update.0.clone()), Reverse(next_update));
+                if kcp.endpoint.is_some() {
+                    let next_update = std::cmp::max(kcp.check(now), now + 1);
+                    guard.push(KcpSchedulerItem(update.0.clone()), Reverse(next_update));
+                }
                 (update.0).1.notify_all();
             }
 
@@ -267,7 +270,7 @@ impl KcpConnection {
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
         {
             let mut kcp = self.control.0.lock();
-            let max_send = get_config().kcp.send_window_size;
+            let max_send = get_config().kcp.send_window_size * 2;
             while kcp.wait_send() > max_send {
                 self.control.1.wait(&mut kcp);
             }
@@ -296,6 +299,10 @@ impl KcpConnection {
     pub fn flush(&mut self) {
         let mut kcp = self.control.0.lock();
         kcp.flush();
+        while kcp.wait_send() > 0 {
+            self.control.1.wait(&mut kcp);
+            kcp.flush();
+        }
     }
 }
 
@@ -303,6 +310,7 @@ impl Drop for KcpConnection {
     fn drop(&mut self) {
         self.flush();
         CONNECTION_STATE.remove(&self.control.0.lock().conv());
+        log::info!("connection closed");
     }
 }
 
