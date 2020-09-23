@@ -15,13 +15,17 @@ pub struct Config {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct KcpConfig {
-    #[serde(default = "default_kcp_update_interval")]
-    pub scheduler_interval: u32,
     pub mtu: usize,
     pub nodelay: bool,
     pub interval: u32,
     pub resend: u32,
     pub flow_control: bool,
+    #[serde(default = "default_kcp_update_interval")]
+    pub scheduler_interval: u32,
+    #[serde(default = "default_kcp_send_window_size")]
+    pub send_window_size: u32,
+    #[serde(default = "default_kcp_recv_window_size")]
+    pub recv_window_size: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -44,6 +48,14 @@ const fn default_icmp_send_buffer_size() -> usize {
 
 const fn default_kcp_update_interval() -> u32 {
     5
+}
+
+const fn default_kcp_send_window_size() -> u32 {
+    1024
+}
+
+const fn default_kcp_recv_window_size() -> u32 {
+    32
 }
 
 pub fn get_config() -> &'static Config {

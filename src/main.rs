@@ -8,9 +8,9 @@ use std::env;
 fn test_kcp() {
     use crate::config::get_config;
     use crate::kcp::KcpConnection;
-    use std::thread;
-    // use std::time::Duration;
     use std::convert::TryInto;
+    use std::thread;
+    use std::time::Duration;
     match get_config().remote {
         Some(ip) => thread::spawn(move || {
             let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
@@ -20,7 +20,8 @@ fn test_kcp() {
                 packet_id += 1;
                 buf[..4].copy_from_slice(&packet_id.to_be_bytes());
                 connection.send(&buf).unwrap();
-                log::info!("sent packet {:?}", packet_id);
+                log::info!("sent packet {}", packet_id);
+                thread::sleep(Duration::from_millis(200));
             }
         }),
         None => thread::spawn(|| {
