@@ -8,9 +8,8 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use crate::config::get_config;
-use crate::icmp::{get_sender, Endpoint, PacketInfo};
+use crate::icmp::{Endpoint, send_packet};
 use bytes::{Buf, Bytes, BytesMut};
-use crossbeam_channel::Sender;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use parking_lot::{Condvar, Mutex};
@@ -38,10 +37,7 @@ unsafe extern "C" fn output_callback(
     assert_ne!(obj, std::ptr::null_mut());
     assert_eq!(kcp, (*obj).inner);
     let bytes = Bytes::copy_from_slice(&*slice_from_raw_parts(buf as *const u8, len as usize));
-    (*obj)
-        .sender
-        .send(((*obj).endpoint.unwrap(), bytes))
-        .unwrap();
+    send_packet((*obj).endpoint.unwrap(), bytes);
     len
 }
 
@@ -53,7 +49,6 @@ pub fn get_conv(block: &[u8]) -> u32 {
 #[derive(Debug)]
 pub struct KcpControlBlock {
     inner: *mut ikcpcb,
-    sender: Sender<PacketInfo>,
     /// The endpoint of the other side
     endpoint: Option<Endpoint>,
 }
@@ -66,7 +61,6 @@ impl KcpControlBlock {
     pub fn new(conv: u32) -> Box<KcpControlBlock> {
         let mut ret = Box::new(KcpControlBlock {
             inner: std::ptr::null_mut(),
-            sender: get_sender(),
             endpoint: None,
         });
         ret.inner = unsafe {
@@ -214,6 +208,7 @@ pub fn init_kcp_scheduler() {
                 kcp.update(now);
                 let next_update = std::cmp::max(kcp.check(now), now + 1);
                 guard.push(KcpSchedulerItem(update.0.clone()), Reverse(next_update));
+                (update.0).1.notify_all();
             }
         }
         thread::sleep(Duration::from_millis(interval as u64));

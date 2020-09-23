@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
+use std::thread_local;
 
 const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
 
@@ -27,14 +28,15 @@ pub struct Endpoint {
     pub id: u16,
 }
 
-pub type PacketInfo = (Endpoint, Bytes);
+pub type PacketWithEndpoint = (Endpoint, Bytes);
 lazy_static! {
-    static ref CHANNEL: (Sender<PacketInfo>, Receiver<PacketInfo>) =
+    static ref CHANNEL: (Sender<PacketWithEndpoint>, Receiver<PacketWithEndpoint>) =
         crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
 }
 
-pub fn get_sender() -> Sender<PacketInfo> {
-    CHANNEL.0.clone()
+pub fn send_packet(to: Endpoint, packet: Bytes) {
+    thread_local!(static LOCAL_SENDER: Sender<PacketWithEndpoint> = CHANNEL.0.clone());
+    LOCAL_SENDER.with(|sender| sender.send((to, packet)).unwrap());
 }
 
 pub fn init_and_loop() {
@@ -80,7 +82,7 @@ fn recv_loop(rx: &mut TransportReceiver) {
     }
 }
 
-fn send_loop(tx: &mut TransportSender, input: Receiver<PacketInfo>) {
+fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
     const HEADER: usize = IcmpPacket::minimum_packet_size();
     let mut buf = [0u8; 1500];
     let mut resend_last_packet = false;
