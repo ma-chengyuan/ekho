@@ -21,7 +21,6 @@ fn test_kcp() {
                 buf[..4].copy_from_slice(&packet_id.to_be_bytes());
                 connection.send(&buf).unwrap();
                 log::info!("sent packet {}", packet_id);
-                thread::sleep(Duration::from_millis(200));
             }
         }),
         None => thread::spawn(|| {
