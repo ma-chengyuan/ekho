@@ -464,6 +464,7 @@ impl KcpControlBlock {
             return Err(KcpError::InvalidKcpPacket);
         }
 
+        log::info!("called input");
         loop {
             if data.len() < KCP_OVERHEAD as usize {
                 break;
