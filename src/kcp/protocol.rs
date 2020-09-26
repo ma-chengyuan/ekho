@@ -307,6 +307,7 @@ impl KcpControlBlock {
             }
         }
         assert_eq!(size, ret.len());
+        log::info!("recv queue size: {}", self.rcv_queue.len());
         Ok(ret.to_bytes())
     }
 
@@ -554,8 +555,14 @@ impl KcpControlBlock {
     }
 
     /// Polls an output packet
+    #[inline]
     pub fn output(&mut self) -> Option<Bytes> {
         self.output.pop_front()
+    }
+
+    #[inline]
+    pub fn has_output(&self) -> bool {
+        !self.output.is_empty()
     }
 
     /// Flush packets in the send queue and the send buffer
@@ -572,7 +579,7 @@ impl KcpControlBlock {
         ) {
             buf.extend_from_slice(&seg.encode());
             if buf.len() as u32 + KCP_OVERHEAD > mtu {
-                output.push_back(buf.to_bytes());
+                output.push_back(Bytes::copy_from_slice(&buf));
                 buf.clear();
             }
         }
@@ -701,7 +708,8 @@ impl KcpControlBlock {
             }
         }
         if !self.buffer.is_empty() {
-            self.output.push_back(self.buffer.to_bytes());
+            self.output.push_back(Bytes::copy_from_slice(&self.buffer));
+            self.buffer.clear();
         }
 
         // Update congestion control code
@@ -771,6 +779,7 @@ impl KcpControlBlock {
         current + next_update
     }
 
+    #[inline]
     pub fn wait_send(&self) -> usize {
         self.snd_buf.len() + self.snd_queue.len()
     }
