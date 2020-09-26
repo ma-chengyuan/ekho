@@ -464,7 +464,6 @@ impl KcpControlBlock {
             return Err(KcpError::InvalidKcpPacket);
         }
 
-        log::info!("called input");
         loop {
             if data.len() < KCP_OVERHEAD as usize {
                 break;
@@ -531,6 +530,7 @@ impl KcpControlBlock {
                 KCP_CMD_WND_TELL => {}
                 _ => unreachable!(),
             }
+            data = &data[len..];
         }
         if has_ack {
             self.increase_skip_acks(sn_max_ack, ts_max_ack);
