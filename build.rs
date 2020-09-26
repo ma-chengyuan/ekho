@@ -24,6 +24,10 @@ fn main() {
         res.compile().unwrap();
     }
 
+    // NO MORE UNSAFE CODE
+    // EKHO IS PURE RUST NOW, YEAH!
+    return;
+
     println!("cargo:rerun-if-changed=kcp/ikcp.h");
     let mut builder = bindgen::Builder::default();
 

@@ -31,7 +31,8 @@ pub struct Endpoint {
 pub type PacketWithEndpoint = (Endpoint, Bytes);
 lazy_static! {
     static ref CHANNEL: (Sender<PacketWithEndpoint>, Receiver<PacketWithEndpoint>) =
-        crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
+        // crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
+        crossbeam_channel::unbounded();
 }
 
 pub fn send_packet(to: Endpoint, packet: Bytes) {

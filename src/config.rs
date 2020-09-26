@@ -15,7 +15,7 @@ pub struct Config {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct KcpConfig {
-    pub mtu: usize,
+    pub mtu: u32,
     pub nodelay: bool,
     pub interval: u32,
     pub resend: u32,
@@ -23,9 +23,9 @@ pub struct KcpConfig {
     #[serde(default = "default_kcp_scheduler_interval")]
     pub scheduler_interval: u32,
     #[serde(default = "default_kcp_send_window_size")]
-    pub send_window_size: u32,
+    pub send_window_size: u16,
     #[serde(default = "default_kcp_recv_window_size")]
-    pub recv_window_size: u32,
+    pub recv_window_size: u16,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -50,11 +50,11 @@ const fn default_kcp_scheduler_interval() -> u32 {
     500
 }
 
-const fn default_kcp_send_window_size() -> u32 {
+const fn default_kcp_send_window_size() -> u16 {
     2048
 }
 
-const fn default_kcp_recv_window_size() -> u32 {
+const fn default_kcp_recv_window_size() -> u16 {
     2048
 }
 
