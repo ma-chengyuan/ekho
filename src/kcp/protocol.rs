@@ -307,7 +307,6 @@ impl KcpControlBlock {
             }
         }
         assert_eq!(size, ret.len());
-        log::info!("recv queue size: {}", self.rcv_queue.len());
         Ok(ret.to_bytes())
     }
 
@@ -385,6 +384,7 @@ impl KcpControlBlock {
                 Ordering::Greater => continue,
                 Ordering::Equal => {
                     self.snd_buf.remove(i);
+                    log::info!("acked packet {}", sn);
                     break;
                 }
             }
@@ -523,6 +523,7 @@ impl KcpControlBlock {
                         seg.sn = sn;
                         seg.una = una;
                         self.recv_segment(seg);
+                        log::info!("pushed packet {} rcv_nxt is now {}", sn, self.rcv_nxt);
                     }
                 }
                 KCP_CMD_WND_ASK => self.probe_should_tell = true,

@@ -172,7 +172,7 @@ pub fn handle_kcp_packet(packet: &[u8], from: Endpoint) {
             let mut kcp = state.control.lock();
             if *state.endpoint.write().get_or_insert(from) == from {
                 // Ignore the result for the time being
-                let _ = kcp.input(packet);
+                let _ = kcp.input(packet).unwrap();
                 state.condvar.notify_all();
             }
         }
