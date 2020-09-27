@@ -175,6 +175,7 @@ pub struct KcpControlBlock {
     /// Send buffer, which stores packets sent / just about to be sent but not yet acknowledged.
     snd_buf: VecDeque<KcpSegment>,
     /// Receive buffer, which stores packets that arrive but are not the one we are waiting for.
+    /// Theoretically, replacing [VecDeque] with [BTreeMap] will improve performance
     rcv_buf: VecDeque<KcpSegment>,
     /// ACKs to be sent in the next flush.
     ack_list: Vec<(/* sn */ u32, /* ts */ u32)>,
@@ -422,13 +423,13 @@ impl KcpControlBlock {
         // Do we have this segment already?
         let mut repeat = false;
         // If we don't, what's the index after which we insert this segment?
-        let mut index = self.rcv_buf.len();
+        let mut index = 0;
         // self.rcv_buf[i].sn decreasing
         for i in (0..self.rcv_buf.len()).rev() {
             match self.rcv_buf[i].sn.cmp(&seg.sn) {
                 Ordering::Greater => continue,
                 Ordering::Less => {
-                    index = i;
+                    index = i + 1;
                     break;
                 }
                 Ordering::Equal => {
