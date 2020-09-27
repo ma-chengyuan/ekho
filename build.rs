@@ -24,10 +24,7 @@ fn main() {
         res.compile().unwrap();
     }
 
-    // NO MORE UNSAFE CODE
-    // EKHO IS PURE RUST NOW, YEAH!
-    return;
-
+    /*
     println!("cargo:rerun-if-changed=kcp/ikcp.h");
     let mut builder = bindgen::Builder::default();
 
@@ -97,4 +94,5 @@ fn main() {
         .expect("couldn't write bindings");
 
     cc::Build::new().file("kcp/ikcp.c").compile("ikcp");
+     */
 }

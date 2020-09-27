@@ -32,7 +32,6 @@ fn test_kcp() {
             loop {
                 let recv = connection.recv();
                 total_size += recv.len();
-                log::info!("recv size: {} {}", recv.len(), total_size);
                 if recv.is_empty() {
                     log::info!("receive complete");
                     break;

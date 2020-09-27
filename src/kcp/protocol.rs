@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::cmp::{max, min, Ordering};
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt::Display;
+use std::convert::TryInto;
 
 /// KCP error type
 #[derive(Debug, Clone)]
@@ -446,22 +446,22 @@ impl KcpControlBlock {
             if data.len() < KCP_OVERHEAD as usize {
                 break;
             }
-            let (header, body) = data.split_at(KCP_OVERHEAD as usize);
+            let (mut header, body) = data.split_at(KCP_OVERHEAD as usize);
             // Read header
-            let conv = LittleEndian::read_u32(&header[0..4]);
+            let conv = header.get_u32_le();
             if conv != self.conv {
                 return Err(KcpError::WrongConv {
                     expected: self.conv,
                     found: conv,
                 });
             }
-            let cmd = header[4];
-            let frg = header[5];
-            let wnd = LittleEndian::read_u16(&header[6..8]);
-            let ts = LittleEndian::read_u32(&header[8..12]);
-            let sn = LittleEndian::read_u32(&header[12..16]);
-            let una = LittleEndian::read_u32(&header[16..20]);
-            let len = LittleEndian::read_u32(&header[20..24]) as usize;
+            let cmd = header.get_u8();
+            let frg = header.get_u8();
+            let wnd = header.get_u16_le();
+            let ts = header.get_u32_le();
+            let sn = header.get_u32_le();
+            let una = header.get_u32_le();
+            let len = header.get_u32_le() as usize;
             data = body;
             if data.len() < len {
                 return Err(KcpError::InvalidKcpPacket);
@@ -501,7 +501,6 @@ impl KcpControlBlock {
                         seg.sn = sn;
                         seg.una = una;
                         self.recv_segment(seg);
-                        log::info!("pushed packet {} rcv_nxt is now {}", sn, self.rcv_nxt);
                     }
                 }
                 KCP_CMD_WND_ASK => self.probe_should_tell = true,
@@ -830,6 +829,6 @@ impl KcpControlBlock {
     }
 
     pub fn conv_from_raw(buf: &[u8]) -> u32 {
-        LittleEndian::read_u32(&buf)
+        u32::from_le_bytes(buf[..4].try_into().unwrap())
     }
 }
