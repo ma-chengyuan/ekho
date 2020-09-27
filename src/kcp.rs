@@ -155,7 +155,9 @@ impl KcpConnection {
 
 impl Drop for KcpConnection {
     fn drop(&mut self) {
+        log::debug!("closing connection...");
         self.flush();
+        log::debug!("connection flushed...");
         let kcp = self.state.control.lock();
         CONNECTION_STATE.remove(&kcp.conv());
         *self.state.endpoint.write() = None;
