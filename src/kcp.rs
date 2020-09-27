@@ -159,7 +159,9 @@ impl Drop for KcpConnection {
         self.flush();
         log::debug!("connection flushed...");
         let kcp = self.state.control.lock();
+        log::debug!("acquired log");
         CONNECTION_STATE.remove(&kcp.conv());
+        log::debug!("removed conv");
         *self.state.endpoint.write() = None;
         log::debug!("connection closed");
     }

@@ -508,6 +508,7 @@ impl KcpControlBlock {
             }
             self.rmt_wnd = wnd;
             self.ack_packets_before_una(una);
+            log::debug!("RCV una: {}", una);
             self.update_una();
             match cmd {
                 KCP_CMD_ACK => {
