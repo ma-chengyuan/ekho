@@ -3,7 +3,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::cmp::{max, min, Ordering};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt::Display;
 
@@ -175,8 +175,7 @@ pub struct KcpControlBlock {
     /// Send buffer, which stores packets sent / just about to be sent but not yet acknowledged.
     snd_buf: VecDeque<KcpSegment>,
     /// Receive buffer, which stores packets that arrive but are not the one we are waiting for.
-    /// Theoretically, replacing [VecDeque] with [BTreeMap] will improve performance
-    rcv_buf: VecDeque<KcpSegment>,
+    rcv_buf: BTreeMap<u32, KcpSegment>,
     /// ACKs to be sent in the next flush.
     ack_list: Vec<(/* sn */ u32, /* ts */ u32)>,
     /// Disable congestion control?
@@ -385,7 +384,6 @@ impl KcpControlBlock {
                 Ordering::Greater => continue,
                 Ordering::Equal => {
                     self.snd_buf.remove(i);
-                    log::info!("acked packet {}", sn);
                     break;
                 }
             }
@@ -420,34 +418,13 @@ impl KcpControlBlock {
             // The segment is invalid
             return;
         }
-        // Do we have this segment already?
-        let mut repeat = false;
-        // If we don't, what's the index after which we insert this segment?
-        let mut index = 0;
-        // self.rcv_buf[i].sn decreasing
-        for i in (0..self.rcv_buf.len()).rev() {
-            match self.rcv_buf[i].sn.cmp(&seg.sn) {
-                Ordering::Greater => continue,
-                Ordering::Less => {
-                    index = i + 1;
-                    break;
-                }
-                Ordering::Equal => {
-                    repeat = true;
-                    break;
-                }
-            }
-        }
-        if !repeat {
-            self.rcv_buf.insert(index, seg);
-        }
-
+        self.rcv_buf.entry(seg.sn).or_insert(seg);
         // Move packets from the buffer to the receive queue if possible
         while !self.rcv_buf.is_empty()
-            && self.rcv_buf[0].sn == self.rcv_nxt
+            && self.rcv_buf.iter().next().unwrap().1.sn == self.rcv_nxt
             && self.rcv_queue.len() < self.rcv_wnd as usize
         {
-            self.rcv_queue.push_back(self.rcv_buf.pop_front().unwrap());
+            self.rcv_queue.push_back(self.rcv_buf.remove(&self.rcv_nxt).unwrap());
             self.rcv_nxt += 1;
         }
     }

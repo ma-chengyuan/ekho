@@ -154,14 +154,9 @@ impl KcpConnection {
 impl Drop for KcpConnection {
     fn drop(&mut self) {
         self.flush();
-        let mut kcp = self.state.control.lock();
+        let kcp = self.state.control.lock();
         CONNECTION_STATE.remove(&kcp.conv());
-        log::info!("connection closed: pre");
-        while kcp.has_output() {
-            self.state.condvar.wait(&mut kcp);
-        }
         *self.state.endpoint.write() = None;
-        log::info!("connection closed");
     }
 }
 
