@@ -25,7 +25,7 @@ fn test_kcp() {
                 }
             }
         }),
-        None => thread::spawn(|| loop {
+        None => thread::spawn(|| {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
             let mut file = File::create("sample.mp4").unwrap();
             loop {

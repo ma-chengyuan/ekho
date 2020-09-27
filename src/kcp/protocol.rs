@@ -412,6 +412,8 @@ impl KcpControlBlock {
                         let rtt = self.current - seg.ts;
                         let btl_bw = (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
                         log::info!("rtt: {} ms, btl_bw: {} kBps", rtt, btl_bw);
+                    } else {
+                        log::warn!("mismatch: {} {}", self.current, seg.ts);
                     }
                     self.snd_buf.remove(i);
                     break;
