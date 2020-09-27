@@ -32,8 +32,8 @@ features = [ "winsock2", "ws2ipdef", "mstcpip", "iphlpapi", "heapapi", "ipmib", 
 
 [build-dependencies]
 env_logger = "0.7.1"
-cc = "1.0.59"
-bindgen = "0.55.1"
+# cc = "1.0.59"
+# bindgen = "0.55.1"
 winres = "0.1.11"
 
 
