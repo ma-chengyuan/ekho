@@ -159,7 +159,7 @@ impl Drop for KcpConnection {
         let kcp = self.state.control.lock();
         CONNECTION_STATE.remove(&kcp.conv());
         *self.state.endpoint.write() = None;
-        log::info!("connection closed");
+        log::debug!("connection closed");
     }
 }
 

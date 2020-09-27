@@ -42,7 +42,7 @@ fn test_kcp() {
 
 fn main() {
     env_logger::Builder::new()
-        .filter_level(LevelFilter::Info)
+        .filter_level(LevelFilter::Debug)
         .format_timestamp_millis()
         .init();
 

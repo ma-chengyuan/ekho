@@ -401,7 +401,7 @@ impl KcpControlBlock {
             self.ts_last_ack = self.current;
             let rtt = self.current - seg.ts;
             let btl_bw = (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
-            log::info!("sn: {}, rtt: {} ms, btl_bw: {} kBps", seg.sn, rtt, btl_bw);
+            log::debug!("ACK sn: {}, rtt: {} ms, btl_bw: {} kBps", seg.sn, rtt, btl_bw);
         }
     }
 
@@ -713,6 +713,7 @@ impl KcpControlBlock {
                 seg.delivered = self.delivered;
                 seg.ts_last_ack = self.ts_last_ack;
 
+                log::debug!("SND sn: {} {}", seg.sn, seg.ts);
                 flush_segment(&mut self.buffer, &mut self.output, self.mtu, &seg);
                 self.dead_link |= seg.resend_attempts >= self.dead_link_threshold;
             }
@@ -745,7 +746,6 @@ impl KcpControlBlock {
     /// Updates the control block
     pub fn update(&mut self, current: u32) {
         self.current = current;
-        log::info!("updating: {}", current);
         if !self.updated {
             self.updated = true;
             self.ts_flush = current;
