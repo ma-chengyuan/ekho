@@ -155,7 +155,6 @@ impl KcpConnection {
 
 impl Drop for KcpConnection {
     fn drop(&mut self) {
-        log::debug!("closing connection...");
         self.flush();
         let conv = self.state.control.lock().conv();
         CONNECTION_STATE.remove(&conv);
@@ -164,7 +163,7 @@ impl Drop for KcpConnection {
     }
 }
 
-pub fn handle_kcp_packet(packet: &[u8], from: Endpoint) {
+pub fn recv_packet(packet: &[u8], from: Endpoint) {
     let conv = KcpControlBlock::conv_from_raw(packet);
     if let Some(state) = CONNECTION_STATE.get(&conv) {
         {

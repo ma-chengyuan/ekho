@@ -24,6 +24,7 @@ fn test_kcp() {
                     break;
                 }
             }
+            std::process::exit(0);
         }),
         None => thread::spawn(|| {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
@@ -36,6 +37,7 @@ fn test_kcp() {
                 }
                 file.write_all(&recv).unwrap();
             }
+            std::process::exit(0);
         }),
     };
 }

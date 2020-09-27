@@ -2,7 +2,7 @@
 #![allow(clippy::type_complexity)]
 
 use crate::config::get_config;
-use crate::kcp::handle_kcp_packet;
+use crate::kcp::recv_packet;
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
@@ -67,7 +67,7 @@ fn recv_loop(rx: &mut TransportReceiver) {
                             && payload.len() >= 8
                             && payload[4..7] == MAGIC
                         {
-                            handle_kcp_packet(
+                            recv_packet(
                                 &payload[8..],
                                 Endpoint {
                                     ip: ipv4,
