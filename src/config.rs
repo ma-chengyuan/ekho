@@ -19,7 +19,7 @@ pub struct KcpConfig {
     pub nodelay: bool,
     pub interval: u32,
     pub resend: u32,
-    pub flow_control: bool,
+    pub congestion_control: bool,
     #[serde(default = "default_kcp_scheduler_interval")]
     pub scheduler_interval: u32,
     #[serde(default = "default_kcp_send_window_size")]

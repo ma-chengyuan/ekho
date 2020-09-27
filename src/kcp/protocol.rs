@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+/// The KCP protocol -- pure algorithmic implementation
+/// Adapted from the original C implementation
+/// Oxidization is under way
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::cmp::{max, min, Ordering};
 use std::collections::{BTreeMap, VecDeque};
@@ -10,9 +14,9 @@ use std::convert::TryInto;
 /// KCP error type
 #[derive(Debug, Clone)]
 pub enum KcpError {
-    /// Input message is too big to be sent even with fragmentation.
+    /// Input message is too large to be sent even with fragmentation.
     SendPacketTooLarge,
-    /// Input data is so small that it can't be a valid KCP packet.
+    /// Input data is so short that it can't be a valid KCP packet.
     InvalidKcpPacket,
     /// Command not supported.
     UnsupportedCommand(u8),
@@ -69,6 +73,7 @@ const KCP_CMD_WND_TELL: u8 = 84;
 
 const KCP_WND_SND_DEFAULT: u16 = 32;
 const KCP_WND_RCV_DEFAULT: u16 = 128;
+const KCP_MAX_FRAGMENTS: u16 = 128;
 
 const KCP_MTU_DEFAULT: u32 = 1400;
 const KCP_INTERVAL_DEFAULT: u32 = 100;
@@ -100,7 +105,7 @@ struct KcpSegment {
     una: u32,
     /// Timestamp for next resend.
     ts_resend: u32,
-    /// Resent timeout.
+    /// Retransmission timeout.
     rto: u32,
     /// Number of times the packet is skip-ACKed.
     skip_acks: u32,
@@ -108,9 +113,13 @@ struct KcpSegment {
     resend_attempts: u32,
     /// The data.
     data: BytesMut,
+
+    // Experimental BBR fields
+    delivered: usize,
+    ts_last_ack: u32,
 }
 
-/// A KCP control block (full algorithmic implementation)
+/// A KCP control block (pure algorithmic implementation)
 pub struct KcpControlBlock {
     /// Conversation ID.
     conv: u32,
@@ -132,9 +141,9 @@ pub struct KcpControlBlock {
     rtt_var: u32,
     /// Smooth RTT estimation.
     srtt: u32,
-    /// Base resend timeout.
+    /// Base retransmission timeout.
     rto: u32,
-    /// Minimum resend timeout.
+    /// Minimum retransmission timeout.
     rto_min: u32,
     /// Send window size (packet).
     snd_wnd: u16,
@@ -168,13 +177,14 @@ pub struct KcpControlBlock {
     dead_link_threshold: u32,
     /// Estimated inflight data in one RTT.
     incr: u32,
-    /// Send queue.
+    /// Send queue, which stores packets that are enqueued but not in the send window.
     snd_queue: VecDeque<KcpSegment>,
-    /// Receive queue.
+    /// Receive queue, which stores packets that are received but not consumed by the application.
     rcv_queue: VecDeque<KcpSegment>,
-    /// Send buffer, which stores packets sent / just about to be sent but not yet acknowledged.
+    /// Send buffer, which stores packets sent but not acknowledged
     snd_buf: VecDeque<KcpSegment>,
-    /// Receive buffer, which stores packets that arrive but are not the one we are waiting for.
+    /// Receive buffer, which stores packets that arrive but cannot be used because a preceding
+    /// packet hasn't arrived yet.
     rcv_buf: BTreeMap<u32, KcpSegment>,
     /// ACKs to be sent in the next flush.
     ack_list: Vec<(/* sn */ u32, /* ts */ u32)>,
@@ -183,15 +193,20 @@ pub struct KcpControlBlock {
     /// Stream mode. If enabled, KCP will try to merge messages to save bandwidth.
     stream: bool,
     /// Fast resend threshold. If set to a non-zero value, a packet will be resend immediately if
-    /// it is skip-ACKed this many time.
+    /// it is skip-ACKed this many time, regardless of RTO.
     fast_resend_threshold: u32,
-    /// Fast resend limit. If set to a non-zero value, a packet will not be resent after this many
+    /// Fast resend limit. If set to a non-zero value, a packet will be resent for at most this many
     /// attempts.
     fast_resend_limit: u32,
-    /// Output queue.
+    /// Output queue, the outer application should actively poll from this queue.
     output: VecDeque<Bytes>,
-    /// Buffer used in outputs
+    /// Buffer used to merge small packets into a batch (thus making better use of bandwidth).
     buffer: BytesMut,
+
+    // Experimental BBR fields
+    ts_last_ack: u32,
+    delivered: usize,
+    rtt_queue: VecDeque<(u32, u32)>,
 }
 
 impl KcpSegment {
@@ -209,6 +224,9 @@ impl KcpSegment {
             skip_acks: 0,
             resend_attempts: 0,
             data,
+            // BBR
+            delivered: 0,
+            ts_last_ack: 0,
         }
     }
 
@@ -273,6 +291,10 @@ impl KcpControlBlock {
             fast_resend_limit: KCP_FAST_RESEND_LIMIT,
             output: Default::default(),
             buffer: BytesMut::with_capacity(2 * KCP_MTU_DEFAULT as usize),
+            // BBR
+            delivered: 0,
+            ts_last_ack: 0,
+            rtt_queue: Default::default(),
         }
     }
 
@@ -334,7 +356,7 @@ impl KcpControlBlock {
         } else {
             (buf.len() + self.mss as usize - 1) / self.mss as usize
         };
-        if count > KCP_WND_RCV_DEFAULT as usize {
+        if count > KCP_MAX_FRAGMENTS as usize {
             return Err(KcpError::SendPacketTooLarge);
         }
         assert!(count > 0);
@@ -383,6 +405,14 @@ impl KcpControlBlock {
                 Ordering::Less => break,
                 Ordering::Greater => continue,
                 Ordering::Equal => {
+                    let seg = &self.snd_buf[i];
+                    if self.current >= seg.ts {
+                        self.delivered += seg.len() + KCP_OVERHEAD as usize;
+                        self.ts_last_ack = self.current;
+                        let rtt = self.current - seg.ts;
+                        let btl_bw = (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
+                        log::info!("rtt: {} ms, btl_bw: {} kBps", rtt, btl_bw);
+                    }
                     self.snd_buf.remove(i);
                     break;
                 }
@@ -404,18 +434,17 @@ impl KcpControlBlock {
         }
         // seg.sn increasing
         for seg in self.snd_buf.iter_mut() {
-            if seg.sn >= sn {
-                break;
-            } else {
+            if seg.sn < sn {
                 seg.skip_acks += 1;
+            } else {
+                break;
             }
         }
     }
 
     /// Receives a segment
-    fn recv_segment(&mut self, seg: KcpSegment) {
+    fn push_segment(&mut self, seg: KcpSegment) {
         if seg.sn >= self.rcv_nxt + self.rcv_wnd as u32 || seg.sn < self.rcv_nxt {
-            // The segment is invalid
             return;
         }
         self.rcv_buf.entry(seg.sn).or_insert(seg);
@@ -500,7 +529,7 @@ impl KcpControlBlock {
                         seg.ts = ts;
                         seg.sn = sn;
                         seg.una = una;
-                        self.recv_segment(seg);
+                        self.push_segment(seg);
                     }
                 }
                 KCP_CMD_WND_ASK => self.probe_should_tell = true,
@@ -539,12 +568,6 @@ impl KcpControlBlock {
         self.output.pop_front()
     }
 
-    #[inline]
-    pub fn has_output(&self) -> bool {
-        !self.output.is_empty()
-    }
-
-    /// Flush packets in the send queue and the send buffer
     pub fn flush(&mut self) {
         if !self.updated {
             return;
@@ -682,6 +705,10 @@ impl KcpControlBlock {
                 seg.ts = current;
                 seg.wnd = wnd;
                 seg.una = self.rcv_nxt;
+
+                seg.delivered = self.delivered;
+                seg.ts_last_ack = self.ts_last_ack;
+
                 flush_segment(&mut self.buffer, &mut self.output, self.mtu, &seg);
                 self.dead_link |= seg.resend_attempts >= self.dead_link_threshold;
             }
@@ -821,7 +848,7 @@ impl KcpControlBlock {
 
     pub fn set_window_size(&mut self, send: u16, recv: u16) {
         self.snd_wnd = send;
-        self.rcv_wnd = max(recv, KCP_WND_RCV_DEFAULT);
+        self.rcv_wnd = max(recv, KCP_MAX_FRAGMENTS);
     }
 
     pub fn conv(&self) -> u32 {

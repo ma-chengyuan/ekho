@@ -105,7 +105,7 @@ impl KcpConnection {
             kcp.set_nodelay(config.nodelay);
             kcp.set_interval(config.interval);
             kcp.set_fast_resend(config.resend);
-            kcp.set_congestion_control(config.flow_control);
+            kcp.set_congestion_control(config.congestion_control);
         }
         CONNECTION_STATE.insert(conv, state.clone());
         Ok(KcpConnection { state })
@@ -167,7 +167,9 @@ pub fn handle_kcp_packet(packet: &[u8], from: Endpoint) {
             let mut kcp = state.control.lock();
             if *state.endpoint.write().get_or_insert(from) == from {
                 // Ignore the result for the time being
-                let _ = kcp.input(packet).unwrap();
+                if let Err(e) = kcp.input(packet) {
+                    log::error!("error processing KCP packet: {}", e);
+                }
                 state.condvar.notify_all();
             }
         }
