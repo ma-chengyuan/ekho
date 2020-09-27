@@ -59,6 +59,7 @@ pub fn init_kcp_scheduler() {
         let start = Instant::now();
         loop {
             let now = start.elapsed().as_millis() as u32;
+            let start_round = Instant::now();
             {
                 let mut guard = UPDATE_SCHEDULE.lock();
                 while guard
@@ -81,6 +82,9 @@ pub fn init_kcp_scheduler() {
                     }
                     state.condvar.notify_all();
                 }
+            }
+            if start_round.elapsed().as_micros() >= interval as u128 {
+                log::warn!("update took a long time: {}us", start_round.elapsed().as_micros());
             }
             thread::sleep(Duration::from_micros(interval as u64));
         }
@@ -143,10 +147,8 @@ impl KcpConnection {
 
     pub fn flush(&mut self) {
         let mut kcp = self.state.control.lock();
-        kcp.flush();
         while kcp.wait_send() > 0 {
             self.state.condvar.wait(&mut kcp);
-            kcp.flush();
         }
     }
 }
@@ -157,6 +159,7 @@ impl Drop for KcpConnection {
         let kcp = self.state.control.lock();
         CONNECTION_STATE.remove(&kcp.conv());
         *self.state.endpoint.write() = None;
+        log::info!("connection closed");
     }
 }
 

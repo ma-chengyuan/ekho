@@ -395,6 +395,16 @@ impl KcpControlBlock {
         self.snd_una = self.snd_buf.front().map_or(self.snd_nxt, |seg| seg.sn);
     }
 
+    fn update_bbr(&mut self, seg: &KcpSegment) {
+        if self.current >= seg.ts {
+            self.delivered += seg.len() + KCP_OVERHEAD as usize;
+            self.ts_last_ack = self.current;
+            let rtt = self.current - seg.ts;
+            let btl_bw = (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
+            log::info!("sn: {}, rtt: {} ms, btl_bw: {} kBps", seg.sn, rtt, btl_bw);
+        }
+    }
+
     /// On ACK, remove the corresponding packet from the send buffer
     fn ack_packet_with_sn(&mut self, sn: u32) {
         if sn < self.snd_una || sn >= self.snd_nxt {
@@ -405,17 +415,8 @@ impl KcpControlBlock {
                 Ordering::Less => break,
                 Ordering::Greater => continue,
                 Ordering::Equal => {
-                    let seg = &self.snd_buf[i];
-                    if self.current >= seg.ts {
-                        self.delivered += seg.len() + KCP_OVERHEAD as usize;
-                        self.ts_last_ack = self.current;
-                        let rtt = self.current - seg.ts;
-                        let btl_bw = (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
-                        log::info!("rtt: {} ms, btl_bw: {} kBps", rtt, btl_bw);
-                    } else {
-                        log::warn!("mismatch: {} {}", self.current, seg.ts);
-                    }
-                    self.snd_buf.remove(i);
+                    let seg = self.snd_buf.remove(i).unwrap();
+                    self.update_bbr(&seg);
                     break;
                 }
             }
@@ -425,7 +426,8 @@ impl KcpControlBlock {
     /// On UNA, remove all packets before UNA value from the send buffer
     fn ack_packets_before_una(&mut self, una: u32) {
         while !self.snd_buf.is_empty() && self.snd_buf[0].sn < una {
-            self.snd_buf.pop_front();
+            let seg = self.snd_buf.pop_front().unwrap();
+            self.update_bbr(&seg);
         }
     }
 
@@ -743,6 +745,7 @@ impl KcpControlBlock {
     /// Updates the control block
     pub fn update(&mut self, current: u32) {
         self.current = current;
+        log::info!("updating: {}", current);
         if !self.updated {
             self.updated = true;
             self.ts_flush = current;
