@@ -13,20 +13,21 @@ fn test_kcp() {
     use std::thread;
     match get_config().remote {
         Some(ip) => thread::spawn(move || {
-            let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
-            let mut file = File::open("sample.json").unwrap();
-            let mut buf = [0u8; 480];
-            loop {
-                let len = file.read(&mut buf).unwrap();
-                connection.send(&buf[..len]).unwrap();
-                if len == 0 {
-                    log::info!("send complete");
-                    break;
+            {
+                let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
+                let mut file = File::open("sample.json").unwrap();
+                let mut buf = [0u8; 480];
+                loop {
+                    let len = file.read(&mut buf).unwrap();
+                    connection.send(&buf[..len]).unwrap();
+                    if len == 0 {
+                        log::info!("send complete");
+                        break;
+                    }
                 }
             }
-            std::process::exit(0);
         }),
-        None => thread::spawn(|| loop {
+        None => thread::spawn(|| {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
             let mut file = File::create("sample.json").unwrap();
             loop {

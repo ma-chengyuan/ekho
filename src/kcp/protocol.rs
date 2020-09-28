@@ -110,7 +110,7 @@ struct KcpSegment {
     /// Number of times the packet is skip-ACKed.
     skip_acks: u32,
     /// Number of resend attempts.
-    resend_attempts: u32,
+    send_attempts: u32,
     /// The data.
     data: BytesMut,
 
@@ -222,7 +222,7 @@ impl KcpSegment {
             ts_resend: 0,
             rto: 0,
             skip_acks: 0,
-            resend_attempts: 0,
+            send_attempts: 0,
             data,
             // BBR
             delivered: 0,
@@ -396,12 +396,14 @@ impl KcpControlBlock {
     }
 
     fn update_bbr(&mut self, seg: &KcpSegment) {
-        if self.current >= seg.ts {
+        if self.current >= seg.ts && seg.send_attempts == 1 {
             self.delivered += seg.len() + KCP_OVERHEAD as usize;
             self.ts_last_ack = self.current;
             let rtt = self.current - seg.ts;
             let btl_bw = (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
-            log::debug!("ACK sn: {}, rtt: {} ms, btl_bw: {} kBps", seg.sn, rtt, btl_bw);
+            if rtt < 100 {
+                log::debug!("ACK sn: {}, rtt: {} ms, btl_bw: {} kBps", seg.sn, rtt, btl_bw);
+            }
         }
     }
 
@@ -661,7 +663,7 @@ impl KcpControlBlock {
             seg.ts_resend = current;
             seg.rto = self.rto as u32;
             seg.skip_acks = 0;
-            seg.resend_attempts = 0;
+            seg.send_attempts = 0;
             self.snd_buf.push_back(seg);
         }
 
@@ -675,19 +677,19 @@ impl KcpControlBlock {
         // Flush data segments
         for seg in self.snd_buf.iter_mut() {
             let mut should_send = false;
-            if seg.resend_attempts == 0 {
+            if seg.send_attempts == 0 {
                 // The first time we try to send this packet!
                 should_send = true;
-                seg.resend_attempts += 1;
-                seg.rto = self.rto as u32;
+                seg.send_attempts += 1;
+                seg.rto = self.rto;
                 seg.ts_resend = current + seg.rto + rto_min;
             } else if current >= seg.ts_resend {
                 // Attempt to resend
                 should_send = true;
-                seg.resend_attempts += 1;
+                seg.send_attempts += 1;
                 self.total_resend_attempts += 1;
                 seg.rto = if self.nodelay {
-                    max(seg.rto, self.rto as u32)
+                    max(seg.rto, self.rto)
                 } else {
                     // Increase RTO by 1.5x, better than 2.0 in TCP
                     seg.rto + seg.rto / 2
@@ -695,11 +697,11 @@ impl KcpControlBlock {
                 seg.ts_resend = current + seg.rto;
                 lost = true;
             } else if seg.skip_acks >= resent
-                && (seg.resend_attempts <= self.fast_resend_limit || self.fast_resend_limit == 0)
+                && (seg.send_attempts <= self.fast_resend_limit || self.fast_resend_limit == 0)
             {
                 // Fast resend
                 should_send = true;
-                seg.resend_attempts += 1;
+                seg.send_attempts += 1;
                 seg.skip_acks = 0;
                 seg.ts_resend = current + seg.rto;
                 change = true;
@@ -713,9 +715,8 @@ impl KcpControlBlock {
                 seg.delivered = self.delivered;
                 seg.ts_last_ack = self.ts_last_ack;
 
-                log::debug!("SND sn: {} {}", seg.sn, seg.ts);
                 flush_segment(&mut self.buffer, &mut self.output, self.mtu, &seg);
-                self.dead_link |= seg.resend_attempts >= self.dead_link_threshold;
+                self.dead_link |= seg.send_attempts >= self.dead_link_threshold;
             }
         }
         if !self.buffer.is_empty() {
