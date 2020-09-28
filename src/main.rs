@@ -26,9 +26,9 @@ fn test_kcp() {
             }
             std::process::exit(0);
         }),
-        None => thread::spawn(|| {
+        None => thread::spawn(|| loop {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
-            let mut file = File::create("sample.mp4").unwrap();
+            let mut file = File::create("sample.json").unwrap();
             loop {
                 let recv = connection.recv();
                 if recv.is_empty() {
@@ -37,7 +37,6 @@ fn test_kcp() {
                 }
                 file.write_all(&recv).unwrap();
             }
-            std::process::exit(0);
         }),
     };
 }
