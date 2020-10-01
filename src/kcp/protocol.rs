@@ -3,14 +3,13 @@
 /// The KCP protocol -- pure algorithmic implementation
 /// Adapted from the original C implementation
 /// Oxidization is under way
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::cell::RefCell;
 use std::cmp::{max, min, Ordering};
-use std::collections::{BTreeMap, BinaryHeap, VecDeque};
-use std::convert::TryInto;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::fmt::Display;
-use std::rc::{Rc, Weak};
+use std::convert::TryInto;
 
 /// KCP error type
 #[derive(Debug, Clone)]
@@ -120,31 +119,6 @@ struct KcpSegment {
     ts_last_ack: u32,
 }
 
-struct ResendSegment {
-    ts: u32,
-    seg: Weak<RefCell<KcpSegment>>,
-}
-
-impl Eq for ResendSegment {}
-
-impl PartialEq for ResendSegment {
-    fn eq(&self, other: &Self) -> bool {
-        self.ts == other.ts
-    }
-}
-
-impl Ord for ResendSegment {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.ts.cmp(&self.ts)
-    }
-}
-
-impl PartialOrd for ResendSegment {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 /// A KCP control block (pure algorithmic implementation)
 pub struct KcpControlBlock {
     /// Conversation ID.
@@ -208,12 +182,12 @@ pub struct KcpControlBlock {
     /// Receive queue, which stores packets that are received but not consumed by the application.
     rcv_queue: VecDeque<KcpSegment>,
     /// Send buffer, which stores packets sent but not acknowledged
-    snd_buf: VecDeque<Rc<RefCell<KcpSegment>>>,
+    snd_buf: VecDeque<KcpSegment>,
     /// Receive buffer, which stores packets that arrive but cannot be used because a preceding
     /// packet hasn't arrived yet.
     rcv_buf: BTreeMap<u32, KcpSegment>,
     /// ACKs to be sent in the next flush.
-    ack_list: VecDeque<(/* sn */ u32, /* ts */ u32)>,
+    ack_list: Vec<(/* sn */ u32, /* ts */ u32)>,
     /// Disable congestion control?
     no_cwnd: bool,
     /// Stream mode. If enabled, KCP will try to merge messages to save bandwidth.
@@ -228,8 +202,6 @@ pub struct KcpControlBlock {
     output: VecDeque<Bytes>,
     /// Buffer used to merge small packets into a batch (thus making better use of bandwidth).
     buffer: BytesMut,
-
-    resends: BinaryHeap<ResendSegment>,
 
     // Experimental BBR fields
     ts_last_ack: u32,
@@ -262,28 +234,20 @@ impl KcpSegment {
         self.data.len()
     }
 
-    fn encode(&self, buf: &mut BytesMut) {
-        buf.put_u32_le(self.conv);
-        buf.put_u8(self.cmd);
-        buf.put_u8(self.frg);
-        buf.put_u16_le(self.wnd);
-        buf.put_u32_le(self.ts);
-        buf.put_u32_le(self.sn);
-        buf.put_u32_le(self.una);
-        buf.put_u32_le(self.len() as u32);
-        buf.extend_from_slice(&self.data);
+    fn encode(&self) -> Bytes {
+        let mut ret = BytesMut::with_capacity(self.len() + KCP_OVERHEAD as usize);
+        ret.put_u32_le(self.conv);
+        ret.put_u8(self.cmd);
+        ret.put_u8(self.frg);
+        ret.put_u16_le(self.wnd);
+        ret.put_u32_le(self.ts);
+        ret.put_u32_le(self.sn);
+        ret.put_u32_le(self.una);
+        ret.put_u32_le(self.len() as u32);
+        ret.extend_from_slice(&self.data);
+        ret.to_bytes()
     }
 }
-
-impl Drop for KcpSegment {
-    fn drop(&mut self) {
-        if self.cmd == KCP_CMD_PUSH {
-            log::debug!("dropped {}", self.sn);
-        }
-    }
-}
-
-unsafe impl Send for KcpControlBlock {}
 
 impl KcpControlBlock {
     pub fn new(conv: u32) -> KcpControlBlock {
@@ -331,7 +295,6 @@ impl KcpControlBlock {
             delivered: 0,
             ts_last_ack: 0,
             rtt_queue: Default::default(),
-            resends: Default::default(),
         }
     }
 
@@ -429,24 +392,18 @@ impl KcpControlBlock {
 
     /// Updates UNA
     fn update_una(&mut self) {
-        self.snd_una = self
-            .snd_buf
-            .front()
-            .map_or(self.snd_nxt, |seg| seg.borrow().sn);
+        self.snd_una = self.snd_buf.front().map_or(self.snd_nxt, |seg| seg.sn);
     }
 
     fn update_bbr(&mut self, seg: &KcpSegment) {
         if self.current >= seg.ts && seg.send_attempts == 1 {
-            self.update_rtt_filter(self.current - seg.ts);
             self.delivered += seg.len() + KCP_OVERHEAD as usize;
             self.ts_last_ack = self.current;
             let rtt = self.current - seg.ts;
-            let btl_bw =
-                (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
-            while !self.rtt_queue.is_empty() && self.rtt_queue.back().unwrap().1 > rtt {
-                self.rtt_queue.pop_back();
+            let btl_bw = (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
+            if rtt < 100 {
+                log::debug!("ACK sn: {}, rtt: {} ms, btl_bw: {} kBps", seg.sn, rtt, btl_bw);
             }
-            self.rtt_queue.push_back((self.current, rtt));
         }
     }
 
@@ -456,13 +413,12 @@ impl KcpControlBlock {
             return;
         }
         for i in 0..self.snd_buf.len() {
-            let tmp_sn = self.snd_buf[i].borrow().sn;
-            match sn.cmp(&tmp_sn) {
+            match sn.cmp(&self.snd_buf[i].sn) {
                 Ordering::Less => break,
                 Ordering::Greater => continue,
                 Ordering::Equal => {
                     let seg = self.snd_buf.remove(i).unwrap();
-                    self.update_bbr(&*seg.borrow());
+                    self.update_bbr(&seg);
                     break;
                 }
             }
@@ -471,32 +427,21 @@ impl KcpControlBlock {
 
     /// On UNA, remove all packets before UNA value from the send buffer
     fn ack_packets_before_una(&mut self, una: u32) {
-        while !self.snd_buf.is_empty() && self.snd_buf[0].borrow().sn < una {
+        while !self.snd_buf.is_empty() && self.snd_buf[0].sn < una {
             let seg = self.snd_buf.pop_front().unwrap();
-            self.update_bbr(&*seg.borrow());
+            self.update_bbr(&seg);
         }
     }
 
     /// If an packet after an unACKed packet is ACKed, we say that the latter packet is skip-ACKed
     fn increase_skip_acks(&mut self, sn: u32, _ts: u32) {
-        if self.fast_resend_threshold == 0 || sn < self.snd_una || sn >= self.snd_nxt {
+        if sn < self.snd_una || sn >= self.snd_nxt {
             return;
         }
         // seg.sn increasing
-        for seg_rc in self.snd_buf.iter_mut() {
-            let mut seg = seg_rc.borrow_mut();
+        for seg in self.snd_buf.iter_mut() {
             if seg.sn < sn {
                 seg.skip_acks += 1;
-                if seg.skip_acks >= self.fast_resend_threshold
-                    && (seg.send_attempts <= self.fast_resend_limit || self.fast_resend_limit == 0)
-                {
-                    seg.skip_acks = 0;
-                    seg.ts_resend = self.current + seg.rto;
-                    self.resends.push(ResendSegment {
-                        ts: seg.ts_resend,
-                        seg: Rc::downgrade(seg_rc),
-                    })
-                }
             } else {
                 break;
             }
@@ -514,8 +459,7 @@ impl KcpControlBlock {
             && self.rcv_buf.iter().next().unwrap().1.sn == self.rcv_nxt
             && self.rcv_queue.len() < self.rcv_wnd as usize
         {
-            self.rcv_queue
-                .push_back(self.rcv_buf.remove(&self.rcv_nxt).unwrap());
+            self.rcv_queue.push_back(self.rcv_buf.remove(&self.rcv_nxt).unwrap());
             self.rcv_nxt += 1;
         }
     }
@@ -523,18 +467,22 @@ impl KcpControlBlock {
     /// Call this when a packet is received from the underlying protocol stack
     /// Return the actual number of bytes inputted into the control block
     pub fn input(&mut self, mut data: &[u8]) -> Result<usize> {
+        let prev_una = self.snd_una;
         let prev_len = data.len();
         let mut has_ack = false;
         let mut sn_max_ack = 0;
         let mut ts_max_ack = 0;
+
         if data.len() < KCP_OVERHEAD as usize {
             return Err(KcpError::InvalidKcpPacket);
         }
+
         loop {
             if data.len() < KCP_OVERHEAD as usize {
                 break;
             }
             let (mut header, body) = data.split_at(KCP_OVERHEAD as usize);
+            // Read header
             let conv = header.get_u32_le();
             if conv != self.conv {
                 return Err(KcpError::WrongConv {
@@ -565,7 +513,9 @@ impl KcpControlBlock {
             self.update_una();
             match cmd {
                 KCP_CMD_ACK => {
-                    log::debug!("ack packet {}", sn);
+                    if self.current >= ts {
+                        self.update_rtt_filter(self.current - ts);
+                    }
                     self.ack_packet_with_sn(sn);
                     self.update_una();
                     if !has_ack || sn > sn_max_ack {
@@ -575,11 +525,16 @@ impl KcpControlBlock {
                     }
                 }
                 KCP_CMD_PUSH => {
-                    self.ack_list.push_back((sn, ts));
+                    self.ack_list.push((sn, ts));
                     if sn < self.rcv_nxt + self.rcv_wnd as u32 {
                         let mut seg = KcpSegment::with_data(data[..len].into());
+                        seg.conv = conv;
+                        seg.cmd = cmd;
                         seg.frg = frg;
+                        seg.wnd = wnd;
+                        seg.ts = ts;
                         seg.sn = sn;
+                        seg.una = una;
                         self.push_segment(seg);
                     }
                 }
@@ -592,22 +547,69 @@ impl KcpControlBlock {
         if has_ack {
             self.increase_skip_acks(sn_max_ack, ts_max_ack);
         }
+        // Update congestion window
+        if self.snd_una > prev_una && self.cwnd < self.rmt_wnd {
+            let mss = self.mss;
+            if self.cwnd < self.ssthresh {
+                self.cwnd += 1;
+                self.incr += mss;
+            } else {
+                self.incr = max(self.incr, mss);
+                self.incr += (mss * mss) / self.incr + (mss / 16);
+                if (self.cwnd + 1) as u32 * mss <= self.incr {
+                    self.cwnd = ((self.incr + mss - 1) / max(1, mss)) as u16;
+                }
+            }
+            if self.cwnd > self.rmt_wnd {
+                self.cwnd = self.rmt_wnd;
+                self.incr = self.cwnd as u32 * mss;
+            }
+        }
         Ok(prev_len - data.len())
     }
 
-    fn remove_invalid_resends(&mut self) {
-        while !self.resends.is_empty() {
-            let resend = self.resends.peek().unwrap();
-            if let Some(seg) = resend.seg.upgrade() {
-                if seg.borrow().ts_resend == resend.ts {
-                    break;
-                }
-            }
-            self.resends.pop();
-        }
+    /// Polls an output packet
+    #[inline]
+    pub fn output(&mut self) -> Option<Bytes> {
+        self.output.pop_front()
     }
 
-    fn update_probe(&mut self) {
+    pub fn flush(&mut self) {
+        if !self.updated {
+            return;
+        }
+
+        fn flush_segment(
+            buf: &mut BytesMut,
+            output: &mut VecDeque<Bytes>,
+            mtu: u32,
+            seg: &KcpSegment,
+        ) {
+            buf.extend_from_slice(&seg.encode());
+            if buf.len() as u32 + KCP_OVERHEAD > mtu {
+                output.push_back(Bytes::copy_from_slice(&buf));
+                buf.clear();
+            }
+        }
+
+        // A template segment
+        let mut seg = KcpSegment::with_data(BytesMut::new());
+        let wnd = self.rcv_wnd.saturating_sub(self.rcv_queue.len() as u16);
+        seg.conv = self.conv;
+        seg.cmd = KCP_CMD_ACK;
+        seg.una = self.rcv_nxt;
+        seg.wnd = wnd;
+        // Send pending ACK packets
+        let mut old_ack_list = Vec::new();
+        std::mem::swap(&mut self.ack_list, &mut old_ack_list);
+        for (sn, ts) in old_ack_list {
+            seg.sn = sn;
+            seg.ts = ts;
+            flush_segment(&mut self.buffer, &mut self.output, self.mtu, &seg);
+        }
+        seg.sn = 0;
+        seg.ts = 0;
+        // Probe window
         if self.rmt_wnd == 0 {
             if self.probe_timeout == 0 {
                 // If we are not probing, start probing window size
@@ -625,122 +627,168 @@ impl KcpControlBlock {
             self.probe_timeout = 0;
             self.ts_probe = 0;
         }
-    }
+        // Send a packet to ask the other side for its window size
+        if self.probe_should_ask {
+            seg.cmd = KCP_CMD_WND_ASK;
+            flush_segment(&mut self.buffer, &mut self.output, self.mtu, &seg);
+            self.probe_should_ask = false;
+        }
+        // Send a packet to tell the other side our window size
+        if self.probe_should_tell {
+            seg.cmd = KCP_CMD_WND_TELL;
+            flush_segment(&mut self.buffer, &mut self.output, self.mtu, &seg);
+            self.probe_should_tell = false;
+        }
 
-    fn update_snd_buf(&mut self) {
-        let cwnd = min(self.snd_wnd, self.rmt_wnd);
+        // Computer congestion window
+        let mut cwnd = min(self.snd_wnd, self.rmt_wnd);
+        if !self.no_cwnd {
+            cwnd = min(cwnd, self.cwnd);
+        }
+
+        let current = self.current;
+        let mut change = false;
+        let mut lost = false;
+
+        // Move segments from the send queue to the send buffer
         while self.snd_nxt < self.snd_una + cwnd as u32 && !self.snd_queue.is_empty() {
             let mut seg = self.snd_queue.pop_front().unwrap();
             seg.conv = self.conv;
             seg.cmd = KCP_CMD_PUSH;
+            seg.wnd = wnd;
+            seg.ts = current;
             seg.sn = self.snd_nxt;
             self.snd_nxt += 1;
-            seg.ts_resend = 0;
-            seg.rto = self.rto;
+            seg.una = self.rcv_nxt;
+            seg.ts_resend = current;
+            seg.rto = self.rto as u32;
             seg.skip_acks = 0;
             seg.send_attempts = 0;
-            let seg = Rc::new(RefCell::new(seg));
-            self.resends.push(ResendSegment {
-                ts: 0,
-                seg: Rc::downgrade(&seg),
-            });
             self.snd_buf.push_back(seg);
         }
-    }
 
-    fn poll_segment(&mut self) -> Option<Rc<RefCell<KcpSegment>>> {
-        if let Some((sn, ts)) = self.ack_list.pop_front() {
-            let mut seg = KcpSegment::with_data(BytesMut::new());
-            seg.conv = self.conv;
-            seg.cmd = KCP_CMD_ACK;
-            seg.sn = sn;
-            seg.ts = ts;
-            Some(Rc::new(RefCell::new(seg)))
-        } else if self.probe_should_ask {
-            let mut seg = KcpSegment::with_data(BytesMut::new());
-            seg.conv = self.conv;
-            seg.cmd = KCP_CMD_WND_ASK;
-            self.probe_should_ask = false;
-            Some(Rc::new(RefCell::new(seg)))
-        } else if self.probe_should_tell {
-            let mut seg = KcpSegment::with_data(BytesMut::new());
-            seg.conv = self.conv;
-            seg.cmd = KCP_CMD_WND_TELL;
-            self.probe_should_tell = false;
-            Some(Rc::new(RefCell::new(seg)))
+        let resent = if self.fast_resend_threshold == 0 {
+            u32::max_value()
         } else {
-            self.remove_invalid_resends();
-            if !self.resends.is_empty() {
-                let seg = self.resends.peek().unwrap().seg.upgrade().unwrap();
-                if seg.borrow().ts_resend <= self.current {
-                    self.resends.pop();
-                    return Some(seg);
-                }
-            }
-            None
-        }
-    }
+            self.fast_resend_threshold
+        };
+        let rto_min = if self.nodelay { 0 } else { self.rto_min >> 3 };
 
-    pub fn output(&mut self) -> Option<Bytes> {
-        self.update_probe();
-        self.update_snd_buf();
-        let mut seg_rc = self.poll_segment()?;
-        self.buffer.clear();
-        loop {
+        // Flush data segments
+        for seg in self.snd_buf.iter_mut() {
+            let mut should_send = false;
+            if seg.send_attempts == 0 {
+                // The first time we try to send this packet!
+                should_send = true;
+                seg.send_attempts += 1;
+                seg.rto = self.rto;
+                seg.ts_resend = current + seg.rto + rto_min;
+            } else if current >= seg.ts_resend {
+                // Attempt to resend
+                should_send = true;
+                seg.send_attempts += 1;
+                self.total_resend_attempts += 1;
+                seg.rto = if self.nodelay {
+                    max(seg.rto, self.rto)
+                } else {
+                    // Increase RTO by 1.5x, better than 2.0 in TCP
+                    seg.rto + seg.rto / 2
+                };
+                seg.ts_resend = current + seg.rto;
+                lost = true;
+            } else if seg.skip_acks >= resent
+                && (seg.send_attempts <= self.fast_resend_limit || self.fast_resend_limit == 0)
             {
-                let mut seg = seg_rc.borrow_mut();
-                seg.ts = self.current;
-                seg.wnd = self.rcv_wnd.saturating_sub(self.rcv_queue.len() as u16);
+                // Fast resend
+                should_send = true;
+                seg.send_attempts += 1;
+                seg.skip_acks = 0;
+                seg.ts_resend = current + seg.rto;
+                change = true;
+            }
+
+            if should_send {
+                seg.ts = current;
+                seg.wnd = wnd;
                 seg.una = self.rcv_nxt;
-                seg.encode(&mut self.buffer);
-                if seg.cmd == KCP_CMD_PUSH {
-                    // Add next to resend
-                    if seg.send_attempts == 0 {
-                        seg.rto = self.rto;
-                        let rto_min = if self.nodelay { 0 } else { self.rto_min >> 3 };
-                        seg.ts_resend = self.current + rto_min + seg.rto;
-                        log::debug!("scheduled resend time {}", seg.ts_resend);
-                    } else {
-                        seg.rto = if self.nodelay {
-                            max(seg.rto, self.rto)
-                        } else {
-                            seg.rto + seg.rto / 2
-                        };
-                        seg.ts_resend = self.current + seg.rto;
-                        log::debug!("scheduled resend time {}", seg.ts_resend);
-                    }
-                    seg.send_attempts += 1;
-                    self.resends.push(ResendSegment {
-                        ts: seg.ts_resend,
-                        seg: Rc::downgrade(&seg_rc),
-                    });
-                }
+
+                seg.delivered = self.delivered;
+                seg.ts_last_ack = self.ts_last_ack;
+
+                flush_segment(&mut self.buffer, &mut self.output, self.mtu, &seg);
+                self.dead_link |= seg.send_attempts >= self.dead_link_threshold;
             }
-            if let Some(nxt) = self.poll_segment() {
-                if self.buffer.len() + nxt.borrow().len() + KCP_OVERHEAD as usize
-                    <= self.mtu as usize
-                {
-                    seg_rc = nxt;
-                    continue;
-                }
-            }
-            break;
         }
-        Some(Bytes::copy_from_slice(&self.buffer))
+        if !self.buffer.is_empty() {
+            self.output.push_back(Bytes::copy_from_slice(&self.buffer));
+            self.buffer.clear();
+        }
+
+        // Update congestion control code
+        if change {
+            let inflight = self.snd_nxt - self.snd_una;
+            self.ssthresh = max((inflight / 2) as u16, KCP_SSTHRESH_MIN);
+            self.cwnd = self.ssthresh + resent as u16;
+            self.incr = self.cwnd as u32 * self.mss;
+        }
+
+        if lost {
+            self.ssthresh = max(self.cwnd / 2, KCP_SSTHRESH_MIN);
+            self.cwnd = 1;
+            self.incr = self.cwnd as u32 * self.mss;
+        }
+
+        if self.cwnd < 1 {
+            self.cwnd = 1;
+            self.incr = self.mss;
+        }
     }
 
+    /// Updates the control block
     pub fn update(&mut self, current: u32) {
         self.current = current;
-        self.update_probe();
-        self.update_snd_buf();
+        if !self.updated {
+            self.updated = true;
+            self.ts_flush = current;
+        }
+        let mut dt = current as i32 - self.ts_flush as i32;
+        if dt >= KCP_LONG_TIME_NO_FLUSH || dt < -KCP_LONG_TIME_NO_FLUSH {
+            self.ts_flush = current;
+            dt = 0
+        }
+        if dt >= 0 {
+            self.ts_flush += self.interval;
+            if self.current >= self.ts_flush {
+                self.ts_flush = self.current + self.interval;
+            }
+            self.flush();
+        }
     }
 
-    pub fn check(&mut self) -> u32 {
-        self.remove_invalid_resends();
-        self.resends
-            .peek()
-            .map(|r| r.ts)
-            .unwrap_or(u32::max_value())
+    /// Checks when to update again
+    pub fn check(&self, current: u32) -> u32 {
+        if !self.updated {
+            return current;
+        }
+        let ts_flush = {
+            let dt = current as i32 - self.ts_flush as i32;
+            if dt >= KCP_LONG_TIME_NO_FLUSH || dt < -KCP_LONG_TIME_NO_FLUSH {
+                current
+            } else {
+                self.ts_flush
+            }
+        };
+        if current >= ts_flush {
+            return current;
+        }
+        let mut next_update = min(self.interval, ts_flush - current);
+        for seg in &self.snd_buf {
+            if seg.ts_resend <= current {
+                return current;
+            }
+            next_update = min(next_update, seg.ts_resend - current);
+        }
+        current + next_update
     }
 
     #[inline]
@@ -809,22 +857,6 @@ impl KcpControlBlock {
         self.rcv_wnd = max(recv, KCP_MAX_FRAGMENTS);
     }
 
-    pub fn set_rto_min(&mut self, rto_min: u32) {
-        self.rto_min = rto_min;
-    }
-
-    pub fn rto_min(&self) -> u32 {
-        self.rto_min
-    }
-
-    pub fn set_rto(&mut self, rto: u32) {
-        self.rto = rto;
-    }
-
-    pub fn rto(&self) -> u32 {
-        self.rto
-    }
-
     pub fn conv(&self) -> u32 {
         self.conv
     }
@@ -833,5 +865,3 @@ impl KcpControlBlock {
         u32::from_le_bytes(buf[..4].try_into().unwrap())
     }
 }
-
-pub fn test() {}

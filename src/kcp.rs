@@ -1,7 +1,7 @@
 use crate::config::get_config;
 use crate::icmp::{send_packet, Endpoint};
 
-pub mod protocol;
+mod protocol;
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -58,36 +58,35 @@ pub fn init_kcp_scheduler() {
         let interval = get_config().kcp.scheduler_interval;
         let start = Instant::now();
         loop {
-            let current = start.elapsed().as_millis() as u32;
+            let now = start.elapsed().as_millis() as u32;
             let start_round = Instant::now();
             {
                 let mut guard = UPDATE_SCHEDULE.lock();
                 while guard
                     .peek()
-                    .map(|item| *item.1 >= Reverse(current))
+                    .map(|item| *item.1 >= Reverse(now))
                     .unwrap_or(false)
                 {
                     let (KcpSchedulerItem(state), _) = guard.pop().unwrap();
                     let mut kcp = state.control.lock();
-                    kcp.update(current);
-                    let endpoint = state.endpoint.read();
-                    if let Some(endpoint) = *endpoint {
-                        while let Some(packet) = kcp.output() {
-                            send_packet(endpoint, packet);
+                    kcp.update(now);
+                    {
+                        let endpoint = state.endpoint.read();
+                        if let Some(endpoint) = *endpoint {
+                            let next_update = std::cmp::max(kcp.check(now), now + 1);
+                            guard.push(KcpSchedulerItem(state.clone()), Reverse(next_update));
+                            while let Some(packet) = kcp.output() {
+                                send_packet(endpoint, packet);
+                            }
                         }
-                        let next_update = kcp.check();
-                        guard.push(KcpSchedulerItem(state.clone()), Reverse(next_update));
                     }
                     state.condvar.notify_all();
                 }
             }
-            if start_round.elapsed().as_millis() >= interval as u128 {
-                log::warn!(
-                    "update took a long time: {}us",
-                    start_round.elapsed().as_micros()
-                );
+            if start_round.elapsed().as_micros() >= interval as u128 {
+                log::warn!("update took a long time: {}us", start_round.elapsed().as_micros());
             }
-            thread::sleep(Duration::from_millis(interval as u64));
+            thread::sleep(Duration::from_micros(interval as u64));
         }
     });
 }
