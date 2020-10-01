@@ -47,7 +47,7 @@ const fn default_icmp_send_buffer_size() -> usize {
 }
 
 const fn default_kcp_scheduler_interval() -> u32 {
-    500
+    10
 }
 
 const fn default_kcp_send_window_size() -> u16 {
