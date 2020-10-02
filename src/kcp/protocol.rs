@@ -87,6 +87,10 @@ const KCP_FAST_RESEND_LIMIT: u32 = 5;
 const KCP_CLOCK_CHANGED: i32 = 10000;
 
 const KCP_RT_PROP_WINDOW: u32 = 10000;
+const KCP_BTL_BW_WINDOW: u32 = 10;
+const KCP_PROBE_RTT_TIME: u32 = 200;
+
+const KCP_GAIN_PHASES: [usize; 8] = [5, 3, 4, 4, 4, 4, 4, 4];
 
 /// A KCP segment
 #[derive(Default)]
@@ -119,6 +123,7 @@ struct KcpSegment {
     // Experimental BBR fields
     delivered: usize,
     ts_last_ack: u32,
+    app_limited: bool,
 }
 
 /// A KCP control block (pure algorithmic implementation)
@@ -137,8 +142,6 @@ pub struct KcpControlBlock {
     snd_nxt: u32,
     /// Sequence number of the next packet to be put in the receive queue.
     rcv_nxt: u32,
-    /// Slow start threshold.
-    ssthresh: u16,
     /// Variance of RTT.
     rtt_var: u32,
     /// Smooth RTT estimation.
@@ -153,14 +156,10 @@ pub struct KcpControlBlock {
     rcv_wnd: u16,
     /// Remote window size (packet).
     rmt_wnd: u16,
-    /// Congestion window size.
-    cwnd: u16,
     /// Current timestamp (ms).
     current: u32,
     /// Update interval (ms).
     interval: u32,
-    /// Total resend attempts.
-    total_resend_attempts: u32,
     /// Nodelay mode.
     nodelay: bool,
     /// Whether the control block is updated at least once.
@@ -177,8 +176,6 @@ pub struct KcpControlBlock {
     probe_timeout: u32,
     /// If a packet does not arrive after this many resend attempts, the link is considered dead.
     dead_link_threshold: u32,
-    /// Estimated inflight data in one RTT.
-    incr: u32,
     /// Send queue, which stores packets that are enqueued but not in the send window.
     snd_queue: VecDeque<KcpSegment>,
     /// Receive queue, which stores packets that are received but not consumed by the application.
@@ -190,8 +187,6 @@ pub struct KcpControlBlock {
     rcv_buf: BTreeMap<u32, KcpSegment>,
     /// ACKs to be sent in the next flush.
     ack_list: Vec<(/* sn */ u32, /* ts */ u32)>,
-    /// Disable congestion control?
-    no_cwnd: bool,
     /// Stream mode. If enabled, KCP will try to merge messages to save bandwidth.
     stream: bool,
     /// Fast resend threshold. If set to a non-zero value, a packet will be resend immediately if
@@ -206,9 +201,22 @@ pub struct KcpControlBlock {
     buffer: BytesMut,
 
     // Experimental BBR fields
+    bbr_enabled: bool,
     ts_last_ack: u32,
     delivered: usize,
-    rtt_queue: VecDeque<(u32, u32)>,
+    inflight: usize,
+    rt_prop_queue: VecDeque<(u32, u32)>,
+    btl_bw_queue: VecDeque<(u32, usize)>,
+    rt_prop_expired: bool,
+    bbr_state: BBRState,
+    app_limited_until: usize,
+}
+
+enum BBRState {
+    Startup,
+    Drain(u32),
+    ProbeBW(u32, usize),
+    ProbeRTT(u32, usize),
 }
 
 impl KcpControlBlock {
@@ -221,7 +229,6 @@ impl KcpControlBlock {
             snd_una: 0,
             snd_nxt: 0,
             rcv_nxt: 0,
-            ssthresh: KCP_SSTHRESH_INIT,
             rtt_var: 0,
             srtt: 0,
             rto: KCP_RTO_DEFAULT,
@@ -229,7 +236,6 @@ impl KcpControlBlock {
             snd_wnd: KCP_WND_SND_DEFAULT,
             rcv_wnd: KCP_WND_RCV_DEFAULT,
             rmt_wnd: KCP_WND_RCV_DEFAULT,
-            cwnd: 0,
             current: 0,
             interval: KCP_INTERVAL_DEFAULT,
             ts_flush: KCP_INTERVAL_DEFAULT,
@@ -237,26 +243,30 @@ impl KcpControlBlock {
             probe_should_ask: false,
             probe_should_tell: false,
             probe_timeout: 0,
-            total_resend_attempts: 0,
             nodelay: false,
             updated: false,
             dead_link_threshold: KCP_DEAD_LINK_DEFAULT,
-            incr: 0,
             snd_queue: Default::default(),
             rcv_queue: Default::default(),
             snd_buf: Default::default(),
             rcv_buf: Default::default(),
             ack_list: Default::default(),
-            no_cwnd: false,
             stream: false,
             fast_resend_threshold: 0,
             fast_resend_limit: KCP_FAST_RESEND_LIMIT,
             output: Default::default(),
             buffer: BytesMut::with_capacity(2 * KCP_MTU_DEFAULT as usize),
+
             // BBR
+            bbr_enabled: true,
             delivered: 0,
             ts_last_ack: 0,
-            rtt_queue: Default::default(),
+            inflight: 0,
+            rt_prop_queue: Default::default(),
+            btl_bw_queue: Default::default(),
+            rt_prop_expired: false,
+            bbr_state: BBRState::Startup,
+            app_limited_until: 0,
         }
     }
 
@@ -337,14 +347,14 @@ impl KcpControlBlock {
         Ok(sent)
     }
 
-    fn update_rtt_filter(&mut self, rtt: u32) {
+    fn update_rtt_filters(&mut self, rtt: u32) {
         if self.srtt == 0 {
             self.srtt = rtt;
             self.rtt_var = rtt / 2;
         } else {
             let delta = (rtt as i32 - self.srtt as i32).abs() as u32;
             self.rtt_var = (3 * self.rtt_var + delta) / 4;
-            self.srtt = max(1, (7 * self.srtt + delta) / 8);
+            self.srtt = max(1, (7 * self.srtt + rtt) / 8);
         }
         let rto = self.srtt + max(self.interval, 4 * self.rtt_var);
         self.rto = max(self.rto_min, min(rto, KCP_RTO_MAX));
@@ -355,39 +365,96 @@ impl KcpControlBlock {
     }
 
     fn update_bbr(&mut self, seg: &KcpSegment) {
+        self.delivered += seg.payload.len() + KCP_OVERHEAD as usize;
+        self.ts_last_ack = self.current;
+        self.inflight = self
+            .inflight
+            .saturating_sub(seg.payload.len() + KCP_OVERHEAD as usize);
+        self.app_limited_until = self
+            .app_limited_until
+            .saturating_sub(seg.payload.len() + KCP_OVERHEAD as usize);
         // xmits == 1 is necessary. If a packet is transmitted multiple times, and we receive an
         // UNA packet prior to the ACK packet, there is no way we can possibly know which
         // retransmission is was that reached the other side.
         if self.current >= seg.ts && seg.xmits == 1 {
-            self.delivered += seg.payload.len() + KCP_OVERHEAD as usize;
-            self.ts_last_ack = self.current;
             let rtt = self.current - seg.ts;
-            let _btl_bw =
-                (self.delivered - seg.delivered) / (self.current - seg.ts_last_ack) as usize;
-            while self.rtt_queue.back().map(|p| p.1 > rtt).unwrap_or(false) {
-                self.rtt_queue.pop_back().unwrap();
+            self.update_rtt_filters(rtt);
+            while self
+                .rt_prop_queue
+                .back()
+                .map(|p| p.1 >= rtt)
+                .unwrap_or(false)
+            {
+                self.rt_prop_queue.pop_back().unwrap();
             }
-            self.rtt_queue.push_back((self.current, rtt));
-            if self.rtt_queue.len() == 1 {
-                log::info!("Updated rt prop estimation: {}ms", rtt);
+            self.rt_prop_queue.push_back((self.current, rtt));
+            if self.rt_prop_expired {
+                while self
+                    .rt_prop_queue
+                    .front()
+                    .map(|p| p.0 + KCP_RT_PROP_WINDOW <= self.current)
+                    .unwrap_or(false)
+                {
+                    self.rt_prop_queue.pop_front().unwrap();
+                }
+                self.rt_prop_expired = false;
+            }
+
+            let btl_bw =
+                (self.delivered - seg.delivered) / (self.ts_last_ack - seg.ts_last_ack) as usize;
+            if !seg.app_limited || btl_bw > self.btl_bw_queue.front().map(|p| p.1).unwrap_or(0) {
+                while self
+                    .btl_bw_queue
+                    .front()
+                    .map(|p| p.0 + KCP_BTL_BW_WINDOW * self.srtt <= self.current)
+                    .unwrap_or(false)
+                {
+                    self.btl_bw_queue.pop_front().unwrap();
+                }
+                while self
+                    .btl_bw_queue
+                    .back()
+                    .map(|p| p.1 <= btl_bw)
+                    .unwrap_or(false)
+                {
+                    self.btl_bw_queue.pop_back().unwrap();
+                }
+                self.btl_bw_queue.push_back((self.current, btl_bw));
             }
         }
     }
 
-    fn update_bbr_filters(&mut self) {
-        while self.rtt_queue.len() >= 2
-            && self.rtt_queue.front().unwrap().0 + KCP_RT_PROP_WINDOW <= self.current
-        {
-            self.rtt_queue.pop_front().unwrap();
+    fn update_bbr_state(&mut self) {
+        if self.rt_prop_queue.is_empty() || self.srtt == 0 {
+            self.bbr_state = BBRState::Startup;
+            return;
         }
-        if self
-            .rtt_queue
-            .front()
-            .map(|p| p.0 + KCP_RT_PROP_WINDOW <= self.current)
-            .unwrap_or(false)
-        {
-            log::debug!("rt prop estimation expired");
-            self.rtt_queue.pop_front().unwrap();
+        if let BBRState::Startup = self.bbr_state {
+            if !self.btl_bw_queue.is_empty()
+                && self.btl_bw_queue.front().unwrap().0 + 3 * self.srtt <= self.current
+            {
+                // Bottle neck bandwidth not updated in 3 rtts, enter drain
+                self.bbr_state = BBRState::Drain(self.current);
+            }
+        } else if let BBRState::Drain(since) = self.bbr_state {
+            if since + 3 * self.srtt <= self.current {
+                // TODO: add random phase initialization
+                self.bbr_state = BBRState::ProbeBW(self.current, 0);
+            }
+        } else if let BBRState::ProbeBW(since, phase) = self.bbr_state {
+            let last_update = self.rt_prop_queue.front().unwrap().0;
+            if last_update + KCP_RT_PROP_WINDOW <= self.current && !self.rt_prop_expired {
+                self.bbr_state = BBRState::ProbeRTT(self.current, phase);
+                self.rt_prop_expired = true;
+            } else if since + self.srtt <= self.current {
+                self.bbr_state = BBRState::ProbeRTT(self.current, phase);
+                self.bbr_state =
+                    BBRState::ProbeBW(self.current, (phase + 1) % KCP_GAIN_PHASES.len());
+            }
+        } else if let BBRState::ProbeRTT(since, phase) = self.bbr_state {
+            if since + KCP_PROBE_RTT_TIME <= self.current {
+                self.bbr_state = BBRState::ProbeBW(self.current, phase);
+            }
         }
     }
 
@@ -416,7 +483,7 @@ impl KcpControlBlock {
     }
 
     fn increase_skip_acks(&mut self, sn: u32, _ts: u32) {
-        if sn < self.snd_una || sn >= self.snd_nxt {
+        if sn < self.snd_una || sn >= self.snd_nxt || self.fast_resend_threshold == 0 {
             return;
         }
         // seg.sn increasing
@@ -446,7 +513,6 @@ impl KcpControlBlock {
     }
 
     pub fn input(&mut self, mut data: &[u8]) -> Result<usize> {
-        let prev_una = self.snd_una;
         let prev_len = data.len();
         let mut has_ack = false;
         let mut sn_max_ack = 0;
@@ -492,9 +558,6 @@ impl KcpControlBlock {
             self.update_una();
             match cmd {
                 KCP_CMD_ACK => {
-                    if self.current >= ts {
-                        self.update_rtt_filter(self.current - ts);
-                    }
                     self.ack_packet_with_sn(sn);
                     self.update_una();
                     if !has_ack || sn > sn_max_ack {
@@ -523,24 +586,7 @@ impl KcpControlBlock {
         if has_ack {
             self.increase_skip_acks(sn_max_ack, ts_max_ack);
         }
-        // Update congestion window
-        if self.snd_una > prev_una && self.cwnd < self.rmt_wnd {
-            let mss = self.mss;
-            if self.cwnd < self.ssthresh {
-                self.cwnd += 1;
-                self.incr += mss;
-            } else {
-                self.incr = max(self.incr, mss);
-                self.incr += (mss * mss) / self.incr + (mss / 16);
-                if (self.cwnd + 1) as u32 * mss <= self.incr {
-                    self.cwnd = ((self.incr + mss - 1) / max(1, mss)) as u16;
-                }
-            }
-            if self.cwnd > self.rmt_wnd {
-                self.cwnd = self.rmt_wnd;
-                self.incr = self.cwnd as u32 * mss;
-            }
-        }
+        self.update_bbr_state();
         Ok(prev_len - data.len())
     }
 
@@ -609,39 +655,46 @@ impl KcpControlBlock {
             self.probe_should_tell = false;
         }
 
-        let mut cwnd = min(self.snd_wnd, self.rmt_wnd);
-        if !self.no_cwnd {
-            cwnd = min(cwnd, self.cwnd);
-        }
-
-        let current = self.current;
-
+        let cwnd = min(self.snd_wnd, self.rmt_wnd);
+        self.update_bbr_state();
+        let bdp = self.bdp();
+        let limit = if self.bbr_enabled {
+            match self.bbr_state {
+                BBRState::Startup => bdp * 2955 / 1024,
+                BBRState::Drain(_) => bdp * 355 / 1024,
+                BBRState::ProbeBW(_, phase) => self.bdp() * KCP_GAIN_PHASES[phase] / 4,
+                BBRState::ProbeRTT(_, _) => 4 * self.mtu as usize,
+            }
+        } else {
+            usize::max_value()
+        };
         // Move segments from the send queue to the send buffer
-        while self.snd_nxt < self.snd_una + cwnd as u32 && !self.snd_queue.is_empty() {
+        while self.snd_nxt < self.snd_una + cwnd as u32
+            && !self.snd_queue.is_empty()
+            && self.inflight <= limit
+        {
             let mut seg = self.snd_queue.pop_front().unwrap();
             seg.conv = self.conv;
             seg.cmd = KCP_CMD_PUSH;
             seg.wnd = wnd;
-            seg.ts = current;
+            seg.ts = self.current;
             seg.sn = self.snd_nxt;
             self.snd_nxt += 1;
             seg.una = self.rcv_nxt;
-            seg.ts_resend = current;
+            seg.ts_resend = self.current;
             seg.rto = self.rto;
             seg.skip_acks = 0;
             seg.xmits = 0;
+            seg.app_limited = self.app_limited_until > 0;
+            self.inflight += seg.payload.len() + KCP_OVERHEAD as usize;
             self.snd_buf.push_back(seg);
+            if self.inflight <= 2 * bdp && self.snd_queue.is_empty() {
+                log::debug!("limited send queue");
+                self.app_limited_until = self.inflight;
+            }
         }
 
-        let resent = if self.fast_resend_threshold == 0 {
-            u32::max_value()
-        } else {
-            self.fast_resend_threshold
-        };
-        let rto_min = if self.nodelay { 0 } else { self.rto_min >> 3 };
-
-        let mut change = false;
-        let mut lost = false;
+        let rto_min = if self.nodelay { 0 } else { self.rto_min };
 
         // Flush data segments
         for i in 0..self.snd_buf.len() {
@@ -652,33 +705,31 @@ impl KcpControlBlock {
                 xmit = true;
                 seg.xmits += 1;
                 seg.rto = self.rto;
-                seg.ts_resend = current + seg.rto + rto_min;
-            } else if current >= seg.ts_resend {
+                seg.ts_resend = self.current + seg.rto + rto_min;
+            } else if self.current >= seg.ts_resend {
                 // Attempt to resend
                 xmit = true;
                 seg.xmits += 1;
-                self.total_resend_attempts += 1;
                 seg.rto = if self.nodelay {
                     max(seg.rto, self.rto)
                 } else {
                     // Increase RTO by 1.5x, better than 2.0 in TCP
                     seg.rto + seg.rto / 2
                 };
-                seg.ts_resend = current + seg.rto;
-                lost = true;
-            } else if seg.skip_acks >= resent
+                seg.ts_resend = self.current + seg.rto;
+            } else if self.fast_resend_threshold != 0
+                && seg.skip_acks >= self.fast_resend_threshold
                 && (seg.xmits <= self.fast_resend_limit || self.fast_resend_limit == 0)
             {
                 // Fast retransmission
                 xmit = true;
                 seg.xmits += 1;
                 seg.skip_acks = 0;
-                seg.ts_resend = current + seg.rto;
-                change = true;
+                seg.ts_resend = self.current + seg.rto;
             }
 
             if xmit {
-                seg.ts = current;
+                seg.ts = self.current;
                 seg.wnd = wnd;
                 seg.una = self.rcv_nxt;
 
@@ -693,25 +744,6 @@ impl KcpControlBlock {
         if !self.buffer.is_empty() {
             self.output.push_back(Bytes::copy_from_slice(&self.buffer));
             self.buffer.clear();
-        }
-
-        // Update congestion control code
-        if change {
-            let inflight = self.snd_nxt - self.snd_una;
-            self.ssthresh = max((inflight / 2) as u16, KCP_SSTHRESH_MIN);
-            self.cwnd = self.ssthresh + resent as u16;
-            self.incr = self.cwnd as u32 * self.mss;
-        }
-
-        if lost {
-            self.ssthresh = max(self.cwnd / 2, KCP_SSTHRESH_MIN);
-            self.cwnd = 1;
-            self.incr = self.cwnd as u32 * self.mss;
-        }
-
-        if self.cwnd < 1 {
-            self.cwnd = 1;
-            self.incr = self.mss;
         }
 
         fn flush_segment(
@@ -795,6 +827,14 @@ impl KcpControlBlock {
         self.mss = mtu - KCP_OVERHEAD;
     }
 
+    pub fn bdp(&self) -> usize {
+        if self.rt_prop_queue.is_empty() || self.btl_bw_queue.is_empty() {
+            self.mtu as usize
+        } else {
+            self.rt_prop_queue.front().unwrap().1 as usize * self.btl_bw_queue.front().unwrap().1
+        }
+    }
+
     pub fn mtu(&mut self) -> u32 {
         self.mtu
     }
@@ -813,11 +853,6 @@ impl KcpControlBlock {
 
     pub fn set_nodelay(&mut self, nodelay: bool) {
         self.nodelay = nodelay;
-        self.rto_min = if nodelay {
-            KCP_RTO_NODELAY
-        } else {
-            KCP_RTO_MIN
-        };
     }
 
     pub fn nodelay(&self) -> bool {
@@ -833,11 +868,11 @@ impl KcpControlBlock {
     }
 
     pub fn set_congestion_control(&mut self, enabled: bool) {
-        self.no_cwnd = !enabled
+        self.bbr_enabled = enabled
     }
 
     pub fn congestion_control(&self) -> bool {
-        !self.no_cwnd
+        self.bbr_enabled
     }
 
     pub fn set_rto(&mut self, rto: u32) {

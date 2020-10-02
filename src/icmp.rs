@@ -20,7 +20,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
 use std::thread_local;
 
-const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
+// const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Endpoint {
@@ -65,10 +65,9 @@ fn recv_loop(rx: &mut TransportReceiver) {
                         if (packet.get_icmp_type() == IcmpTypes::EchoRequest
                             || packet.get_icmp_type() == IcmpTypes::EchoReply)
                             && payload.len() >= 8
-                            && payload[4..7] == MAGIC
                         {
                             recv_packet(
-                                &payload[8..],
+                                &payload[4..],
                                 Endpoint {
                                     ip: ipv4,
                                     id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
@@ -105,15 +104,13 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
             )
         } else {
             let (endpoint, block) = input.recv().expect("error receiving data");
-            packet_len = HEADER + 4 /* conv */ + 3 /* magic number */ + 1 /* type */ + block.len();
+            packet_len = HEADER + 4 + block.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..packet_len]).unwrap();
             packet.set_icmp_type(code);
             let payload = packet.payload_mut();
             payload[0..2].copy_from_slice(&endpoint.id.to_be_bytes());
             payload[2..4].copy_from_slice(&seq.entry(endpoint).or_insert(0).to_be_bytes());
-            payload[4..7].copy_from_slice(&MAGIC);
-            payload[7] = 0 /* RESERVED */;
-            payload[8..].copy_from_slice(&block);
+            payload[4..].copy_from_slice(&block);
             packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
             last_endpoint = endpoint;
             tx.send_to(packet.consume_to_immutable(), IpAddr::from(endpoint.ip))
