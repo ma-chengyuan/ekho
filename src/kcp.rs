@@ -55,11 +55,9 @@ fn schedule_immediate_update(target: Arc<KcpConnectionState>) {
 
 pub fn init_kcp_scheduler() {
     thread::spawn(|| {
-        let interval = get_config().kcp.scheduler_interval;
         let start = Instant::now();
         loop {
             let now = start.elapsed().as_millis() as u32;
-            let start_round = Instant::now();
             {
                 let mut guard = UPDATE_SCHEDULE.lock();
                 while guard
@@ -83,10 +81,8 @@ pub fn init_kcp_scheduler() {
                     state.condvar.notify_all();
                 }
             }
-            if start_round.elapsed().as_micros() >= interval as u128 {
-                log::warn!("update took a long time: {}us", start_round.elapsed().as_micros());
-            }
-            thread::sleep(Duration::from_micros(interval as u64));
+            // This does NOT mean sleeping for 1 ms, since most OSes have very poor sleep accuracy
+            thread::sleep(Duration::from_millis(1));
         }
     });
 }
@@ -110,6 +106,8 @@ impl KcpConnection {
             kcp.set_interval(config.interval);
             kcp.set_fast_resend(config.resend);
             kcp.set_congestion_control(config.congestion_control);
+            kcp.set_rto(config.rto);
+            kcp.set_rto_min(config.rto_min);
         }
         CONNECTION_STATE.insert(conv, state.clone());
         Ok(KcpConnection { state })
