@@ -145,7 +145,7 @@ impl KcpConnection {
 
     pub fn flush(&mut self) {
         let mut kcp = self.state.control.lock();
-        while kcp.wait_send() > 0 {
+        while !kcp.all_flushed() {
             self.state.condvar.wait(&mut kcp);
         }
     }

@@ -472,6 +472,7 @@ impl KcpControlBlock {
             }
             self.rmt_wnd = wnd;
             self.ack_packets_before_una(una);
+            log::debug!("una: una");
             self.update_una();
             match cmd {
                 KCP_CMD_ACK => {
@@ -557,6 +558,8 @@ impl KcpControlBlock {
         if !self.updated {
             return;
         }
+
+        log::debug!("snd_buf size: {}", self.snd_buf.len());
 
         // A template segment
         let wnd = self.rcv_wnd.saturating_sub(self.rcv_queue.len() as u16);
@@ -759,9 +762,12 @@ impl KcpControlBlock {
         next_update
     }
 
-    #[inline]
     pub fn wait_send(&self) -> usize {
         self.snd_buf.len() + self.snd_queue.len()
+    }
+
+    pub fn all_flushed(&self) -> bool {
+        self.snd_buf.is_empty() && self.snd_queue.is_empty() && self.ack_list.is_empty()
     }
 
     pub fn set_mtu(&mut self, mtu: u32) {
