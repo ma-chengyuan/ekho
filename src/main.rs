@@ -14,7 +14,7 @@ fn test_kcp() {
     match get_config().remote {
         Some(ip) => thread::spawn(move || {
             let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
-            let mut file = File::open("sample-recv.mp4").unwrap();
+            let mut file = File::create("sample-recv.mp4").unwrap();
             connection.send(&[]).unwrap();
             loop {
                 let recv = connection.recv();
@@ -27,7 +27,7 @@ fn test_kcp() {
         }),
         None => thread::spawn(|| {
             let mut connection = KcpConnection::new(get_config().conv).unwrap();
-            let mut file = File::create("sample-big.mp4").unwrap();
+            let mut file = File::open("sample-big.mp4").unwrap();
             let signal = connection.recv();
             assert_eq!(signal.len(), 0);
             log::info!("start sending...");
