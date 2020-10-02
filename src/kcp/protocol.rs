@@ -728,7 +728,7 @@ impl KcpControlBlock {
         if (current as i32 - self.ts_flush as i32).abs() >= KCP_CLOCK_CHANGED {
             self.ts_flush = current;
         }
-        if self.ts_flush >= current {
+        if self.ts_flush <= current {
             self.ts_flush += self.interval;
             if self.current >= self.ts_flush {
                 self.ts_flush = self.current + self.interval;
