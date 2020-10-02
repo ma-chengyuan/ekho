@@ -374,6 +374,23 @@ impl KcpControlBlock {
         }
     }
 
+    fn update_bbr_filters(&mut self) {
+        while self.rtt_queue.len() >= 2
+            && self.rtt_queue.front().unwrap().0 + KCP_RT_PROP_WINDOW <= self.current
+        {
+            self.rtt_queue.pop_front().unwrap();
+        }
+        if self
+            .rtt_queue
+            .front()
+            .map(|p| p.0 + KCP_RT_PROP_WINDOW <= self.current)
+            .unwrap_or(false)
+        {
+            log::debug!("rt prop estimation expired");
+            self.rtt_queue.pop_front().unwrap();
+        }
+    }
+
     fn ack_packet_with_sn(&mut self, sn: u32) {
         if sn < self.snd_una || sn >= self.snd_nxt {
             return;
@@ -472,7 +489,6 @@ impl KcpControlBlock {
             }
             self.rmt_wnd = wnd;
             self.ack_packets_before_una(una);
-            log::debug!("una: una");
             self.update_una();
             match cmd {
                 KCP_CMD_ACK => {
@@ -558,8 +574,6 @@ impl KcpControlBlock {
         if !self.updated {
             return;
         }
-
-        log::debug!("snd_buf size: {}", self.snd_buf.len());
 
         // A template segment
         let wnd = self.rcv_wnd.saturating_sub(self.rcv_queue.len() as u16);
