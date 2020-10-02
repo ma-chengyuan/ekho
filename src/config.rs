@@ -20,7 +20,6 @@ pub struct KcpConfig {
     pub interval: u32,
     pub resend: u32,
     pub congestion_control: bool,
-    pub rto: u32,
     pub rto_min: u32,
     #[serde(default = "default_kcp_send_window_size")]
     pub send_window_size: u16,

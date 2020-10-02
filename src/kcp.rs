@@ -106,7 +106,6 @@ impl KcpConnection {
             kcp.set_interval(config.interval);
             kcp.set_fast_resend(config.resend);
             kcp.set_congestion_control(config.congestion_control);
-            kcp.set_rto(config.rto);
             kcp.set_rto_min(config.rto_min);
         }
         CONNECTION_STATE.insert(conv, state.clone());

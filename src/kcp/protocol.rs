@@ -2,7 +2,11 @@
 
 /// The KCP protocol -- pure algorithmic implementation
 /// Adapted from the original C implementation
+///
+/// Feature: BBR congestion control
+///
 /// Oxidization is under way
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::cmp::{max, min, Ordering};
 use std::collections::{BTreeMap, VecDeque};
@@ -78,8 +82,6 @@ const KCP_MTU_DEFAULT: u32 = 1400;
 const KCP_INTERVAL_DEFAULT: u32 = 100;
 const KCP_DEAD_LINK_DEFAULT: u32 = 20;
 
-const KCP_SSTHRESH_INIT: u16 = 2;
-const KCP_SSTHRESH_MIN: u16 = 2;
 const KCP_PROBE_INIT: u32 = 7000;
 const KCP_PROBE_LIMIT: u32 = 120000;
 
@@ -117,12 +119,15 @@ struct KcpSegment {
     skip_acks: u32,
     /// Number of resend attempts.
     xmits: u32,
-    /// The data.
+    /// The payload.
     payload: BytesMut,
 
     // Experimental BBR fields
+    /// Delivered bytes when sent.
     delivered: usize,
+    /// Time of receiving the last ACK packet when the packet is sent.
     ts_last_ack: u32,
+    /// When this packet is sent, is the traffic limited by bandwidth or app?
     app_limited: bool,
 }
 
@@ -201,14 +206,23 @@ pub struct KcpControlBlock {
     buffer: BytesMut,
 
     // Experimental BBR fields
+    /// Is BBR enabled?
     bbr_enabled: bool,
+    /// Time of receiving the last ACK packet.
     ts_last_ack: u32,
+    /// Bytes confirmed to have been delivered
     delivered: usize,
+    /// Bytes inflight
     inflight: usize,
+    /// Monotone queue for Round trip propagation time.
     rt_prop_queue: VecDeque<(u32, u32)>,
+    /// Monotonic queue for Bottleneck Bandwidth.
     btl_bw_queue: VecDeque<(u32, usize)>,
+    /// Whether the next BBR update should clear expired RTprop analysis.
     rt_prop_expired: bool,
+    /// Current BBR state.
     bbr_state: BBRState,
+    /// See the original BBR paper for more info.
     app_limited_until: usize,
 }
 
@@ -616,7 +630,7 @@ impl KcpControlBlock {
         }
     }
 
-    pub fn flush(&mut self) {
+    fn flush(&mut self) {
         if !self.updated {
             return;
         }
@@ -873,14 +887,6 @@ impl KcpControlBlock {
 
     pub fn congestion_control(&self) -> bool {
         self.bbr_enabled
-    }
-
-    pub fn set_rto(&mut self, rto: u32) {
-        self.rto = rto;
-    }
-
-    pub fn rto(&self) -> u32 {
-        self.rto
     }
 
     pub fn set_rto_min(&mut self, rto_min: u32) {

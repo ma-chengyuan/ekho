@@ -14,7 +14,23 @@ fn test_kcp() {
     match get_config().remote {
         Some(ip) => thread::spawn(move || {
             let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
-            let mut file = File::open("sample-big.mp4").unwrap();
+            let mut file = File::open("sample-recv.mp4").unwrap();
+            connection.send(&[]).unwrap();
+            loop {
+                let recv = connection.recv();
+                if recv.is_empty() {
+                    log::info!("received complete");
+                    break;
+                }
+                file.write_all(&recv).unwrap();
+            }
+        }),
+        None => thread::spawn(|| {
+            let mut connection = KcpConnection::new(get_config().conv).unwrap();
+            let mut file = File::create("sample-big.mp4").unwrap();
+            let signal = connection.recv();
+            assert_eq!(signal.len(), 0);
+            log::info!("start sending...");
             let mut buf = [0u8; 480];
             loop {
                 let len = file.read(&mut buf).unwrap();
@@ -23,18 +39,6 @@ fn test_kcp() {
                     log::info!("send complete");
                     break;
                 }
-            }
-        }),
-        None => thread::spawn(|| {
-            let mut connection = KcpConnection::new(get_config().conv).unwrap();
-            let mut file = File::create("sample.json").unwrap();
-            loop {
-                let recv = connection.recv();
-                if recv.is_empty() {
-                    log::info!("receive complete");
-                    break;
-                }
-                file.write_all(&recv).unwrap();
             }
         }),
     };
