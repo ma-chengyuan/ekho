@@ -1,11 +1,31 @@
+/*
+Copyright 2020 Chengyuan Ma
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sub-
+-license, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-
+-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
 #![allow(dead_code)]
 
-/// The KCP protocol -- pure algorithmic implementation
-/// Adapted from the original C implementation
-///
-/// Feature: BBR congestion control
-///
-/// Oxidization is under way
+//! The KCP protocol (pure algorithmic implementation).
+//!
+//! This is adapted from the original C implementation, but slightly oxidized and optimized for
+//! large send / receive windows. Optimizations currently include using B Tree as the data structure
+//! behind receive buffers (as opposed to naive linked list in original implementation) and using
+//! the BBR congestion control algorithm instead of the naive loss-based congestion control.
+//!
+//! This is 100% compatible with other KCP implementations.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::cmp::{max, min, Ordering};
@@ -14,10 +34,10 @@ use std::convert::TryInto;
 use std::error::Error;
 use std::fmt::Display;
 
-/// KCP error type
+/// KCP error type.
 #[derive(Debug, Clone)]
 pub enum KcpError {
-    /// Input message is too large to be sent even with fragmentation.
+    /// The message to be sent is too large even with fragmentation.
     SendPacketTooLarge,
     /// Input data is so short that it can't be a valid KCP packet.
     InvalidKcpPacket,
@@ -35,7 +55,7 @@ impl Display for KcpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             KcpError::SendPacketTooLarge => write!(f, "send packet too large"),
-            KcpError::InvalidKcpPacket => write!(f, "invalid kcp block"),
+            KcpError::InvalidKcpPacket => write!(f, "invalid kcp packet"),
             KcpError::UnsupportedCommand(cmd) => write!(f, "unsupported command: {}", cmd),
             KcpError::NotAvailable => write!(f, "empty queue (try again later)"),
             KcpError::WrongConv { expected, found } => {
@@ -60,41 +80,65 @@ impl From<KcpError> for std::io::Error {
     }
 }
 
+/// The result type for KCP operations.
 type Result<T> = std::result::Result<T, KcpError>;
 
+/// The overhead imposed by KCP per packet (aka. packet header length).
 const KCP_OVERHEAD: u32 = 24;
 
-const KCP_RTO_NODELAY: u32 = 30;
+/// The default retransmission time out for KCP. This is used until an ACK packet is received, after
+/// which RTO will be calculated based on RTT.
 const KCP_RTO_DEFAULT: u32 = 200;
+/// Minimum RTO, which is the time needed after first transmission attempt for KCP to first consider
+/// retransmission.
 const KCP_RTO_MIN: u32 = 100;
+/// The upper bound for RTO.
 const KCP_RTO_MAX: u32 = 60000;
 
+/// KCP command that pushes a data segment onto the receive buffer.
 const KCP_CMD_PUSH: u8 = 81;
+/// KCP command that represents an ACK packet.
 const KCP_CMD_ACK: u8 = 82;
+/// KCP command that asks the receiver to send back a packet telling the sender its window size.
 const KCP_CMD_WND_ASK: u8 = 83;
+/// KCP command that tells the receiver the sender's window size.
 const KCP_CMD_WND_TELL: u8 = 84;
 
+/// Default send window size.
 const KCP_WND_SND_DEFAULT: u16 = 32;
+/// Default receive window size.
 const KCP_WND_RCV_DEFAULT: u16 = 128;
+/// The upper bound for fragmentation of a long payload.
 const KCP_MAX_FRAGMENTS: u16 = 128;
 
+/// MTU for a default KCP control block.
 const KCP_MTU_DEFAULT: u32 = 1400;
+/// Update interval for a default KCP control block.
 const KCP_INTERVAL_DEFAULT: u32 = 100;
+/// Dead link threshold for a default KCP control block.
 const KCP_DEAD_LINK_DEFAULT: u32 = 20;
 
+/// Initial window probing timeout.
 const KCP_PROBE_INIT: u32 = 7000;
+/// The upper bound for window probing timeout.
 const KCP_PROBE_LIMIT: u32 = 120000;
 
+/// Maximum number of fast resend attempts by default.
 const KCP_FAST_RESEND_LIMIT: u32 = 5;
+/// If the difference between the current time and the time of last flush is greater than this
+/// value, KCP considers the clock to have been changed.
 const KCP_CLOCK_CHANGED: i32 = 10000;
 
+/// Window length (unit: ms) for RTprop (Round-trip propagation time) filters in BBR.
 const KCP_RT_PROP_WINDOW: u32 = 10000;
+/// Window length (unit: RTT) for BtlBW (Bottleneck bandwidth) filters in BBR.
 const KCP_BTL_BW_WINDOW: u32 = 10;
+/// Time (unit: ms) for one ProbeRTT phase.
 const KCP_PROBE_RTT_TIME: u32 = 200;
+/// Gain cycles (x4) used in ProbeBW state of the BBR control algorithm.
+const KCP_GAIN_CYCLE: [usize; 8] = [5, 3, 4, 4, 4, 4, 4, 4];
 
-const KCP_GAIN_PHASES: [usize; 8] = [5, 3, 4, 4, 4, 4, 4, 4];
-
-/// A KCP segment
+/// KCP segment representing a KCP packet.
 #[derive(Default)]
 struct KcpSegment {
     /// Conversation ID.
@@ -117,12 +161,12 @@ struct KcpSegment {
     rto: u32,
     /// Number of times the packet is skip-ACKed.
     skip_acks: u32,
-    /// Number of resend attempts.
+    /// Number of transmission attempts.
     xmits: u32,
     /// The payload.
     payload: BytesMut,
 
-    // Experimental BBR fields
+    // BBR
     /// Delivered bytes when sent.
     delivered: usize,
     /// Time of receiving the last ACK packet when the packet is sent.
@@ -131,7 +175,9 @@ struct KcpSegment {
     app_limited: bool,
 }
 
-/// A KCP control block (pure algorithmic implementation)
+/// KCP control block with BBR congestion control.
+///
+/// This control block is **NOT** safe for concurrent access -- to do so please wrap it in a Mutex.
 pub struct KcpControlBlock {
     /// Conversation ID.
     conv: u32,
@@ -173,9 +219,9 @@ pub struct KcpControlBlock {
     ts_flush: u32,
     /// Timestamp for next probe.
     ts_probe: u32,
-    /// Whether we should ask the other side to tell us its window size
+    /// Whether we should ask the other side to tell us its window size.
     probe_should_ask: bool,
-    /// Whether we should tell the otherside its window size
+    /// Whether we should tell the other side our window size.
     probe_should_tell: bool,
     /// Probing timeout.
     probe_timeout: u32,
@@ -185,14 +231,14 @@ pub struct KcpControlBlock {
     snd_queue: VecDeque<KcpSegment>,
     /// Receive queue, which stores packets that are received but not consumed by the application.
     rcv_queue: VecDeque<KcpSegment>,
-    /// Send buffer, which stores packets sent but not acknowledged
+    /// Send buffer, which stores packets sent but not yet acknowledged.
     snd_buf: VecDeque<KcpSegment>,
     /// Receive buffer, which stores packets that arrive but cannot be used because a preceding
     /// packet hasn't arrived yet.
     rcv_buf: BTreeMap<u32, KcpSegment>,
     /// ACKs to be sent in the next flush.
     ack_list: Vec<(/* sn */ u32, /* ts */ u32)>,
-    /// Stream mode. If enabled, KCP will try to merge messages to save bandwidth.
+    /// Stream mode. If enabled, KCP will try to merge payloads to save bandwidth.
     stream: bool,
     /// Fast resend threshold. If set to a non-zero value, a packet will be resend immediately if
     /// it is skip-ACKed this many time, regardless of RTO.
@@ -210,9 +256,9 @@ pub struct KcpControlBlock {
     bbr_enabled: bool,
     /// Time of receiving the last ACK packet.
     ts_last_ack: u32,
-    /// Bytes confirmed to have been delivered
+    /// Bytes confirmed to have been delivered.
     delivered: usize,
-    /// Bytes inflight
+    /// Bytes currently inflight.
     inflight: usize,
     /// Monotone queue for Round trip propagation time.
     rt_prop_queue: VecDeque<(u32, u32)>,
@@ -226,14 +272,23 @@ pub struct KcpControlBlock {
     app_limited_until: usize,
 }
 
+/// States for the BBR congestion control algorithm.
+///
+/// Adapted from the appendix section of the original BBR paper.
 enum BBRState {
+    /// Startup phase, in which BBR quickly discovers the bottleneck bandwidth.
     Startup,
-    Drain(u32),
-    ProbeBW(u32, usize),
-    ProbeRTT(u32, usize),
+    /// Drain phase used to drain the pipe over-filled by the previous start up phase.
+    Drain,
+    /// The main phase of BBR, in which BBR cycles through different gains in an attempt to probe
+    /// the bottleneck bandwidth.
+    ProbeBW(/* since */ u32, /* phase */ usize),
+    /// In this phase, BBR drastically reduces the congestion window to accurately probe RT prop.
+    ProbeRTT(/* since */ u32, /* phase */ usize),
 }
 
 impl KcpControlBlock {
+    /// Creates a new KCP control block with the given conversation ID and default parameters.
     pub fn new(conv: u32) -> KcpControlBlock {
         KcpControlBlock {
             conv,
@@ -284,6 +339,9 @@ impl KcpControlBlock {
         }
     }
 
+    /// Peeks the size of the next packet.
+    ///
+    /// Returns error if there is currently no packets in the receive buffer.
     pub fn peek_size(&self) -> Result<usize> {
         let seg = self.rcv_queue.front().ok_or(KcpError::NotAvailable)?;
         if seg.frg == 0 {
@@ -302,6 +360,11 @@ impl KcpControlBlock {
         Ok(len)
     }
 
+    /// Receives a packet of data using this KCP control block.
+    ///
+    /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one receive
+    /// corresponds to one [send](#method.send) on the other side. Otherwise, this correlation
+    /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
     pub fn recv(&mut self) -> Result<Bytes> {
         let size = self.peek_size()?;
         let mut ret = BytesMut::with_capacity(size);
@@ -316,6 +379,14 @@ impl KcpControlBlock {
         Ok(ret.to_bytes())
     }
 
+    /// Sends some data using this KCP control block.
+    ///
+    /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one send
+    /// corresponds to one [receive](#method.recv) on the other side. Otherwise, this correlation
+    /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
+    ///
+    /// **Note**: After calling this do remember to call [check](#method.check), as
+    /// an input packet may invalidate previous time estimations of the next update.
     pub fn send(&mut self, mut buf: &[u8]) -> Result<usize> {
         let mut sent = 0;
         if self.stream {
@@ -361,6 +432,7 @@ impl KcpControlBlock {
         Ok(sent)
     }
 
+    /// Updates the RTT filter and recalculates RTO according to RFC 6298.
     fn update_rtt_filters(&mut self, rtt: u32) {
         if self.srtt == 0 {
             self.srtt = rtt;
@@ -374,11 +446,14 @@ impl KcpControlBlock {
         self.rto = max(self.rto_min, min(rto, KCP_RTO_MAX));
     }
 
+    /// Recalculates UNA based on the current [send buffer](#structfield.snd_buf).
     fn update_una(&mut self) {
         self.snd_una = self.snd_buf.front().map_or(self.snd_nxt, |seg| seg.sn);
     }
 
-    fn update_bbr(&mut self, seg: &KcpSegment) {
+    /// Updates BBR filters and relevant fields when a packet is acknowledged, roughly equivalent to
+    /// the `onAck` function in the BBR paper.
+    fn update_bbr_on_ack(&mut self, seg: &KcpSegment) {
         self.delivered += seg.payload.len() + KCP_OVERHEAD as usize;
         self.ts_last_ack = self.current;
         self.inflight = self
@@ -389,7 +464,7 @@ impl KcpControlBlock {
             .saturating_sub(seg.payload.len() + KCP_OVERHEAD as usize);
         // xmits == 1 is necessary. If a packet is transmitted multiple times, and we receive an
         // UNA packet prior to the ACK packet, there is no way we can possibly know which
-        // retransmission is was that reached the other side.
+        // (re)transmission it was that reached the other side.
         if self.current >= seg.ts && seg.xmits == 1 {
             let rtt = self.current - seg.ts;
             self.update_rtt_filters(rtt);
@@ -438,6 +513,7 @@ impl KcpControlBlock {
         }
     }
 
+    /// Updates the BBR state machine.
     fn update_bbr_state(&mut self) {
         if self.rt_prop_queue.is_empty() || self.srtt == 0 {
             self.bbr_state = BBRState::Startup;
@@ -447,23 +523,25 @@ impl KcpControlBlock {
             if !self.btl_bw_queue.is_empty()
                 && self.btl_bw_queue.front().unwrap().0 + 3 * self.srtt <= self.current
             {
-                // Bottle neck bandwidth not updated in 3 rtts, enter drain
-                self.bbr_state = BBRState::Drain(self.current);
+                // Bottle neck bandwidth has not been updated in 3 RTTs, indicating that the pipe
+                // is filled and we have probe the bandwidth, enter drain
+                self.bbr_state = BBRState::Drain;
             }
-        } else if let BBRState::Drain(since) = self.bbr_state {
-            if since + 3 * self.srtt <= self.current {
+        } else if let BBRState::Drain = self.bbr_state {
+            if self.inflight <= self.bdp() {
                 // TODO: add random phase initialization
                 self.bbr_state = BBRState::ProbeBW(self.current, 0);
             }
         } else if let BBRState::ProbeBW(since, phase) = self.bbr_state {
-            let last_update = self.rt_prop_queue.front().unwrap().0;
-            if last_update + KCP_RT_PROP_WINDOW <= self.current && !self.rt_prop_expired {
+            let last_rt_prop_update = self.rt_prop_queue.front().unwrap().0;
+            if last_rt_prop_update + KCP_RT_PROP_WINDOW <= self.current && !self.rt_prop_expired {
                 self.bbr_state = BBRState::ProbeRTT(self.current, phase);
                 self.rt_prop_expired = true;
             } else if since + self.srtt <= self.current {
+                // Each gain cycle phase lasts for one RTT
                 self.bbr_state = BBRState::ProbeRTT(self.current, phase);
                 self.bbr_state =
-                    BBRState::ProbeBW(self.current, (phase + 1) % KCP_GAIN_PHASES.len());
+                    BBRState::ProbeBW(self.current, (phase + 1) % KCP_GAIN_CYCLE.len());
             }
         } else if let BBRState::ProbeRTT(since, phase) = self.bbr_state {
             if since + KCP_PROBE_RTT_TIME <= self.current {
@@ -472,6 +550,8 @@ impl KcpControlBlock {
         }
     }
 
+    /// Removes the packet from the [send buffer](#structfield.snd_buf) whose sequence number is `sn`
+    /// marks it as acknowledged.
     fn ack_packet_with_sn(&mut self, sn: u32) {
         if sn < self.snd_una || sn >= self.snd_nxt {
             return;
@@ -482,22 +562,26 @@ impl KcpControlBlock {
                 Ordering::Greater => continue,
                 Ordering::Equal => {
                     let seg = self.snd_buf.remove(i).unwrap();
-                    self.update_bbr(&seg);
+                    self.update_bbr_on_ack(&seg);
                     break;
                 }
             }
         }
     }
 
+    /// Removes packets from the [send buffer](#structfield.snd_buf) whose sequence number is less
+    /// than `una` and marks them as acknowledged.
     fn ack_packets_before_una(&mut self, una: u32) {
         while !self.snd_buf.is_empty() && self.snd_buf[0].sn < una {
             let seg = self.snd_buf.pop_front().unwrap();
-            self.update_bbr(&seg);
+            self.update_bbr_on_ack(&seg);
         }
     }
 
+    /// Increases the skip-ACK count of packets with sequence number less than `sn` (useful in KCP
+    /// fast retransmission).
     fn increase_skip_acks(&mut self, sn: u32, _ts: u32) {
-        if sn < self.snd_una || sn >= self.snd_nxt || self.fast_resend_threshold == 0 {
+        if sn < self.snd_una || sn >= self.snd_nxt {
             return;
         }
         // seg.sn increasing
@@ -510,8 +594,12 @@ impl KcpControlBlock {
         }
     }
 
+    /// Pushes a segment onto the [receive buffer](#structfield.rcv_buf), and if possible, moves
+    /// segments from the receiver buffer to the [receive queue](#structfield.rcv_queue).
     fn push_segment(&mut self, seg: KcpSegment) {
         if seg.sn >= self.rcv_nxt + self.rcv_wnd as u32 || seg.sn < self.rcv_nxt {
+            // OPTIMIZE: this check is unnecessary, since this function is only called in input(),
+            //  which contains this check already.
             return;
         }
         self.rcv_buf.entry(seg.sn).or_insert(seg);
@@ -526,6 +614,12 @@ impl KcpControlBlock {
         }
     }
 
+    /// Feeds a raw packet from the underlying protocol stack into the control block.
+    ///
+    /// Returns the total number of bytes that is actually considered valid by KCP.
+    ///
+    /// **Note**: After calling this do remember to call [check](#method.check), as
+    /// an input packet may invalidate previous time estimations of the next update.
     pub fn input(&mut self, mut data: &[u8]) -> Result<usize> {
         let prev_len = data.len();
         let mut has_ack = false;
@@ -581,14 +675,16 @@ impl KcpControlBlock {
                     }
                 }
                 KCP_CMD_PUSH => {
-                    self.ack_list.push((sn, ts));
                     if sn < self.rcv_nxt + self.rcv_wnd as u32 {
-                        self.push_segment(KcpSegment {
-                            sn,
-                            frg,
-                            payload: data[..len].into(),
-                            ..Default::default()
-                        });
+                        self.ack_list.push((sn, ts));
+                        if sn >= self.rcv_nxt {
+                            self.push_segment(KcpSegment {
+                                sn,
+                                frg,
+                                payload: data[..len].into(),
+                                ..Default::default()
+                            });
+                        }
                     }
                 }
                 KCP_CMD_WND_ASK => self.probe_should_tell = true,
@@ -597,19 +693,29 @@ impl KcpControlBlock {
             }
             data = &data[len..];
         }
-        if has_ack {
+        if has_ack && self.fast_resend_threshold > 0 {
+            // OPTIMIZE: if we have a large receive window and a large flow of traffic, the
+            //  increase_skip_acks operation here may become computationally demanding, because
+            //  it has a worst-case linear time complexity. It is perhaps better to limit the
+            //  frequency to call it, perhaps every self.interval or so. This would of course
+            //  undermine its purpose of fast-retransmission, but would reduce CPU usage. Another
+            //  solution is to maintain snd_buf with a modified BST to ensure log complexity of
+            //  increase_skip_acks operation, but the effect may be canceled out by the constant
+            //  factor.
             self.increase_skip_acks(sn_max_ack, ts_max_ack);
         }
         self.update_bbr_state();
         Ok(prev_len - data.len())
     }
 
-    /// Polls an output packet
-    #[inline]
+    /// Polls an output packet that can be directly sent with the underlying protocol stack.
+    ///
+    /// Packet size is guaranteed to be at most the configured MTU.
     pub fn output(&mut self) -> Option<Bytes> {
         self.output.pop_front()
     }
 
+    /// Updates the probing state, recalculating the probing timeout if necessary.
     fn update_probe(&mut self) {
         if self.rmt_wnd == 0 {
             if self.probe_timeout == 0 {
@@ -630,12 +736,14 @@ impl KcpControlBlock {
         }
     }
 
+    /// Flushes packets from the [send queue](#structfield.snd_queue) to the
+    /// [send buffer](#structfield.snd_buf), and (re)transmits the packets in the send buffer
+    /// if necessary.
     fn flush(&mut self) {
         if !self.updated {
             return;
         }
 
-        // A template segment
         let wnd = self.rcv_wnd.saturating_sub(self.rcv_queue.len() as u16);
         let mut seg = KcpSegment {
             conv: self.conv,
@@ -645,7 +753,6 @@ impl KcpControlBlock {
             ..Default::default()
         };
 
-        // Send pending ACK packets
         let mut old_ack_list = Vec::new();
         std::mem::swap(&mut self.ack_list, &mut old_ack_list);
         for (sn, ts) in old_ack_list {
@@ -669,20 +776,31 @@ impl KcpControlBlock {
             self.probe_should_tell = false;
         }
 
-        let cwnd = min(self.snd_wnd, self.rmt_wnd);
         self.update_bbr_state();
-        let bdp = self.bdp();
+        // Because we are not really pacing the packets, the sending logic is different from what
+        // is stated in the original BBR paper. The original BBR uses two parameters: cwnd_gain
+        // and pacing_gain. However, the effects of the two parameters are hard to distinguish when
+        // packets are flushed. Thus, it may be better to merge the two parameters into one here.
         let limit = if self.bbr_enabled {
+            // OPTIMIZE: empirical tests have found the current limit to be a bit conservative.
+            //  one solution might be to multiply the current limit with a small, configurable gain.
             match self.bbr_state {
-                BBRState::Startup => bdp * 2955 / 1024,
-                BBRState::Drain(_) => bdp * 355 / 1024,
-                BBRState::ProbeBW(_, phase) => self.bdp() * KCP_GAIN_PHASES[phase] / 4,
+                BBRState::Startup => self.bdp() * 2955 / 1024, /* 2 / ln2 */
+                // ln2 / 2 is the value of pacing_gain. Given the current state machine logic in
+                // update_bbr_state, this value stops KCP from sending anything.
+                BBRState::Drain => self.bdp() * 355 / 1024, /* ln2 / 2 */
+                BBRState::ProbeBW(_, phase) => self.bdp() * KCP_GAIN_CYCLE[phase] / 4,
+                // OPTIMIZE: according to BBRv2, half BDP seems to be a better limit in ProbeRTT
+                //  phase. Considering that the current limit does not significantly impose a
+                //  penalty to throughput, I'll keep the current limit.
                 BBRState::ProbeRTT(_, _) => 4 * self.mtu as usize,
             }
         } else {
             usize::max_value()
         };
+
         // Move segments from the send queue to the send buffer
+        let cwnd = min(self.snd_wnd, self.rmt_wnd);
         while self.snd_nxt < self.snd_una + cwnd as u32
             && !self.snd_queue.is_empty()
             && self.inflight <= limit
@@ -690,40 +808,29 @@ impl KcpControlBlock {
             let mut seg = self.snd_queue.pop_front().unwrap();
             seg.conv = self.conv;
             seg.cmd = KCP_CMD_PUSH;
-            seg.wnd = wnd;
-            seg.ts = self.current;
             seg.sn = self.snd_nxt;
             self.snd_nxt += 1;
-            seg.una = self.rcv_nxt;
-            seg.ts_resend = self.current;
-            seg.rto = self.rto;
-            seg.skip_acks = 0;
-            seg.xmits = 0;
             seg.app_limited = self.app_limited_until > 0;
             self.inflight += seg.payload.len() + KCP_OVERHEAD as usize;
             self.snd_buf.push_back(seg);
-            if self.inflight <= 2 * bdp && self.snd_queue.is_empty() {
-                log::debug!("limited send queue");
+            if self.inflight <= limit && self.snd_queue.is_empty() {
                 self.app_limited_until = self.inflight;
             }
         }
 
         let rto_min = if self.nodelay { 0 } else { self.rto_min };
 
-        // Flush data segments
+        // (Re)transmit segments in the send buffer
         for i in 0..self.snd_buf.len() {
             let seg = &mut self.snd_buf[i];
             let mut xmit = false;
             if seg.xmits == 0 {
-                // The first time we try to send this packet!
                 xmit = true;
-                seg.xmits += 1;
                 seg.rto = self.rto;
                 seg.ts_resend = self.current + seg.rto + rto_min;
             } else if self.current >= seg.ts_resend {
-                // Attempt to resend
+                // Regular retransmission
                 xmit = true;
-                seg.xmits += 1;
                 seg.rto = if self.nodelay {
                     max(seg.rto, self.rto)
                 } else {
@@ -737,12 +844,12 @@ impl KcpControlBlock {
             {
                 // Fast retransmission
                 xmit = true;
-                seg.xmits += 1;
                 seg.skip_acks = 0;
                 seg.ts_resend = self.current + seg.rto;
             }
 
             if xmit {
+                seg.xmits += 1;
                 seg.ts = self.current;
                 seg.wnd = wnd;
                 seg.una = self.rcv_nxt;
@@ -766,6 +873,10 @@ impl KcpControlBlock {
             mtu: u32,
             seg: &KcpSegment,
         ) {
+            if buf.len() + seg.payload.len() + KCP_OVERHEAD as usize > mtu as usize {
+                output.push_back(Bytes::copy_from_slice(&buf));
+                buf.clear();
+            }
             buf.put_u32_le(seg.conv);
             buf.put_u8(seg.cmd);
             buf.put_u8(seg.frg);
@@ -775,13 +886,10 @@ impl KcpControlBlock {
             buf.put_u32_le(seg.una);
             buf.put_u32_le(seg.payload.len() as u32);
             buf.extend_from_slice(&seg.payload);
-            if buf.len() as u32 + KCP_OVERHEAD > mtu {
-                output.push_back(Bytes::copy_from_slice(&buf));
-                buf.clear();
-            }
         }
     }
 
+    /// Sets the internal time to `current` and then updates the whole control block.
     pub fn update(&mut self, current: u32) {
         self.current = current;
         if !self.updated {
@@ -800,6 +908,8 @@ impl KcpControlBlock {
         }
     }
 
+    /// Checks the next time you should call [update](#method.update) assuming current time is
+    /// `current`.
     pub fn check(&self, current: u32) -> u32 {
         if !self.updated {
             return current;
@@ -822,12 +932,29 @@ impl KcpControlBlock {
         next_update
     }
 
+    /// Gets the number of packets wait to be sent. This includes both unsent packets and packets
+    /// that have been sent but not acknowledged by the other side.
     pub fn wait_send(&self) -> usize {
         self.snd_buf.len() + self.snd_queue.len()
     }
 
+    /// Checks if everything is flushed, including unsent data packets and ACK packets.
+    ///
+    /// You may want to call this when you are about to drop this control block, to check if KCP has
+    /// finished everything up.
     pub fn all_flushed(&self) -> bool {
         self.snd_buf.is_empty() && self.snd_queue.is_empty() && self.ack_list.is_empty()
+    }
+
+    /// Returns the Bandwidth-Delay Product.
+    ///
+    /// For detailed explanation of BDP please refer to Google's BBR paper.
+    pub fn bdp(&self) -> usize {
+        if self.rt_prop_queue.is_empty() || self.btl_bw_queue.is_empty() {
+            self.mtu as usize
+        } else {
+            self.rt_prop_queue.front().unwrap().1 as usize * self.btl_bw_queue.front().unwrap().1
+        }
     }
 
     pub fn set_mtu(&mut self, mtu: u32) {
@@ -839,14 +966,6 @@ impl KcpControlBlock {
         }
         self.mtu = mtu;
         self.mss = mtu - KCP_OVERHEAD;
-    }
-
-    pub fn bdp(&self) -> usize {
-        if self.rt_prop_queue.is_empty() || self.btl_bw_queue.is_empty() {
-            self.mtu as usize
-        } else {
-            self.rt_prop_queue.front().unwrap().1 as usize * self.btl_bw_queue.front().unwrap().1
-        }
     }
 
     pub fn mtu(&mut self) -> u32 {
@@ -906,6 +1025,9 @@ impl KcpControlBlock {
         self.conv
     }
 
+    /// Gets the conversation id from a raw packet.
+    ///
+    /// Panics if `buf` as a length less than 4.
     pub fn conv_from_raw(buf: &[u8]) -> u32 {
         u32::from_le_bytes(buf[..4].try_into().unwrap())
     }
