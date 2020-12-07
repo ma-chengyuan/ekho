@@ -4,10 +4,10 @@
 use crate::config::get_config;
 use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
-use pnet::packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::{MutablePacket, Packet};
-use pnet::transport::{
+use pnet_packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
+use pnet_packet::ip::IpNextHeaderProtocols;
+use pnet_packet::{MutablePacket, Packet};
+use pnet_transport::{
     icmp_packet_iter, transport_channel, TransportChannelType, TransportProtocol,
     TransportReceiver, TransportSender,
 };
@@ -107,7 +107,7 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
             payload[0..2].copy_from_slice(&endpoint.id.to_be_bytes());
             payload[2..4].copy_from_slice(&seq.entry(endpoint).or_insert(0).to_be_bytes());
             payload[4..].copy_from_slice(&block);
-            packet.set_checksum(pnet::packet::icmp::checksum(&packet.to_immutable()));
+            packet.set_checksum(pnet_packet::icmp::checksum(&packet.to_immutable()));
             last_endpoint = endpoint;
             tx.send_to(packet.consume_to_immutable(), IpAddr::from(endpoint.ip))
         };
@@ -137,7 +137,7 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
 mod platform_specific {
     use lazy_static::lazy_static;
     use parking_lot::RwLock;
-    use pnet::transport::TransportReceiver;
+    use pnet_transport::TransportReceiver;
     use std::ffi::CString;
     use std::mem;
     use std::net::Ipv4Addr;
