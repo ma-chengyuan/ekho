@@ -2,8 +2,6 @@
 #![allow(clippy::type_complexity)]
 
 use crate::config::get_config;
-use crate::kcp::recv_packet;
-use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
 use pnet::packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
@@ -13,36 +11,34 @@ use pnet::transport::{
     icmp_packet_iter, transport_channel, TransportChannelType, TransportProtocol,
     TransportReceiver, TransportSender,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
 use std::thread_local;
 
-// const MAGIC: [u8; 3] = [0x4b, 0x43, 0x50];
-
-#[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
 pub struct Endpoint {
     pub ip: Ipv4Addr,
     pub id: u16,
 }
 
-pub type PacketWithEndpoint = (Endpoint, Bytes);
+pub type PacketWithEndpoint = (Endpoint, Vec<u8>);
 lazy_static! {
     static ref CHANNEL: (Sender<PacketWithEndpoint>, Receiver<PacketWithEndpoint>) =
         // crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
         crossbeam_channel::unbounded();
 }
 
-pub fn send_packet(to: Endpoint, packet: Bytes) {
+pub fn send_packet(to: Endpoint, packet: Vec<u8>) {
     thread_local!(static LOCAL_SENDER: Sender<PacketWithEndpoint> = CHANNEL.0.clone());
     LOCAL_SENDER.with(|sender| sender.send((to, packet)).unwrap());
 }
 
 pub fn init_and_loop() {
     let (mut tx, mut rx) = transport_channel(
-        get_config().icmp.recv_buffer_size,
+        8192,
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
     .expect("error creating transport channel");
@@ -64,9 +60,9 @@ fn recv_loop(rx: &mut TransportReceiver) {
                         let payload = packet.payload();
                         if (packet.get_icmp_type() == IcmpTypes::EchoRequest
                             || packet.get_icmp_type() == IcmpTypes::EchoReply)
-                            && payload.len() >= 8
+                            && payload.len() >= 4
                         {
-                            recv_packet(
+                            crate::kcp::on_recv_packet(
                                 &payload[4..],
                                 Endpoint {
                                     ip: ipv4,
@@ -122,7 +118,7 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
                 false
             }
             Err(e) => match e.raw_os_error() {
-                Some(105 /*ENOBUFS on Unix*/) if cfg!(unix) => true,
+                Some(105 /*ENOBUFS*/) if cfg!(unix) => true,
                 _ => panic!("error sending ICMP packets: {}", e),
             },
         }
@@ -246,6 +242,10 @@ mod platform_specific {
             thread::spawn(|| loop {
                 NotifyAddrChange(0 as PHANDLE, 0 as LPOVERLAPPED);
                 *LOCAL_IP.write() = LOCAL_INTERFACE.and_then(|index| get_ip_from_index(index));
+                // Luckily, we do not need to re-bind to socket, because when we bind the IP to the
+                // raw socket Windows actually binds that socket to the network adaptor. As long as
+                // the network adaptor does not change the change of local IP does not invalidate
+                // the socket.
                 log::info!("Local IP changed to {:?}", LOCAL_IP.read());
             });
         }

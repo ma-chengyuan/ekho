@@ -27,7 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //!
 //! This is 100% compatible with other KCP implementations.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut};
 use std::cmp::{max, min, Ordering};
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::TryInto;
@@ -164,7 +164,7 @@ struct KcpSegment {
     /// Number of transmission attempts.
     xmits: u32,
     /// The payload.
-    payload: BytesMut,
+    payload: Vec<u8>,
 
     // BBR
     /// Delivered bytes when sent.
@@ -247,9 +247,9 @@ pub struct KcpControlBlock {
     /// attempts.
     fast_resend_limit: u32,
     /// Output queue, the outer application should actively poll from this queue.
-    output: VecDeque<Bytes>,
+    output: VecDeque<Vec<u8>>,
     /// Buffer used to merge small packets into a batch (thus making better use of bandwidth).
-    buffer: BytesMut,
+    buffer: Vec<u8>,
 
     // Experimental BBR fields
     /// Is BBR enabled?
@@ -324,7 +324,7 @@ impl KcpControlBlock {
             fast_resend_threshold: 0,
             fast_resend_limit: KCP_FAST_RESEND_LIMIT,
             output: Default::default(),
-            buffer: BytesMut::with_capacity(2 * KCP_MTU_DEFAULT as usize),
+            buffer: Vec::with_capacity(2 * KCP_MTU_DEFAULT as usize),
 
             // BBR
             bbr_enabled: true,
@@ -365,18 +365,18 @@ impl KcpControlBlock {
     /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one receive
     /// corresponds to one [send](#method.send) on the other side. Otherwise, this correlation
     /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
-    pub fn recv(&mut self) -> Result<Bytes> {
+    pub fn recv(&mut self) -> Result<Vec<u8>> {
         let size = self.peek_size()?;
-        let mut ret = BytesMut::with_capacity(size);
+        let mut ret = Vec::with_capacity(size);
         while !self.rcv_queue.is_empty() {
-            let seg = self.rcv_queue.pop_front().unwrap();
-            ret.extend_from_slice(&seg.payload);
+            let mut seg = self.rcv_queue.pop_front().unwrap();
+            ret.append(&mut seg.payload);
             if seg.frg == 0 {
                 break;
             }
         }
         assert_eq!(size, ret.len());
-        Ok(ret.to_bytes())
+        Ok(ret)
     }
 
     /// Sends some data using this KCP control block.
@@ -711,7 +711,7 @@ impl KcpControlBlock {
     /// Polls an output packet that can be directly sent with the underlying protocol stack.
     ///
     /// Packet size is guaranteed to be at most the configured MTU.
-    pub fn output(&mut self) -> Option<Bytes> {
+    pub fn output(&mut self) -> Option<Vec<u8>> {
         self.output.pop_front()
     }
 
@@ -863,19 +863,21 @@ impl KcpControlBlock {
         }
 
         if !self.buffer.is_empty() {
-            self.output.push_back(Bytes::copy_from_slice(&self.buffer));
-            self.buffer.clear();
+            let mut new_buf = Vec::with_capacity(2 * self.mtu as usize);
+            std::mem::swap(&mut self.buffer, &mut new_buf);
+            self.output.push_back(new_buf);
         }
 
         fn flush_segment(
-            buf: &mut BytesMut,
-            output: &mut VecDeque<Bytes>,
+            buf: &mut Vec<u8>,
+            output: &mut VecDeque<Vec<u8>>,
             mtu: u32,
             seg: &KcpSegment,
         ) {
             if buf.len() + seg.payload.len() + KCP_OVERHEAD as usize > mtu as usize {
-                output.push_back(Bytes::copy_from_slice(&buf));
-                buf.clear();
+                let mut new_buf = Vec::with_capacity(2 * mtu as usize);
+                std::mem::swap(buf, &mut new_buf);
+                output.push_back(new_buf);
             }
             buf.put_u32_le(seg.conv);
             buf.put_u8(seg.cmd);

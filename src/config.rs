@@ -1,19 +1,20 @@
 use crate::icmp::Endpoint;
+use chacha20poly1305::Key;
 use once_cell::sync::OnceCell;
-use serde::{Deserialize, Serialize};
+use serde::de::{Error, Visitor};
+use serde::{Deserialize, Deserializer};
 use std::path::Path;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub struct Config {
     #[serde(default)]
     pub remote: Option<Endpoint>,
-    pub conv: u32,
-
     pub kcp: KcpConfig,
-    pub icmp: IcmpConfig,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub key: Key,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 pub struct KcpConfig {
     pub mtu: u32,
     pub nodelay: bool,
@@ -27,23 +28,7 @@ pub struct KcpConfig {
     pub recv_window_size: u16,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct IcmpConfig {
-    #[serde(default = "default_icmp_recv_buffer_size")]
-    pub recv_buffer_size: usize,
-    #[serde(default = "default_icmp_send_buffer_size")]
-    pub send_buffer_size: usize,
-}
-
 static CONFIG: OnceCell<Config> = OnceCell::new();
-
-const fn default_icmp_recv_buffer_size() -> usize {
-    4096
-}
-
-const fn default_icmp_send_buffer_size() -> usize {
-    32
-}
 
 const fn default_kcp_send_window_size() -> u16 {
     2048
@@ -51,6 +36,23 @@ const fn default_kcp_send_window_size() -> u16 {
 
 const fn default_kcp_recv_window_size() -> u16 {
     2048
+}
+
+fn deserialize_key<'de, D: Deserializer<'de>>(d: D) -> Result<Key, D::Error> {
+    struct HexKeyVisitor;
+    impl<'de> Visitor<'de> for HexKeyVisitor {
+        type Value = Key;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(formatter, "a length-64 hex string describing the key")
+        }
+
+        fn visit_str<E: Error>(self, v: &str) -> Result<Self::Value, E> {
+            let bytes = hex::decode(v).map_err(E::custom)?;
+            Ok(Key::from_exact_iter(bytes).ok_or_else(|| E::custom("wrong key length"))?)
+        }
+    }
+    d.deserialize_any(HexKeyVisitor)
 }
 
 pub fn get_config() -> &'static Config {

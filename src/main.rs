@@ -1,48 +1,10 @@
 mod config;
 mod icmp;
 mod kcp;
+mod protocol;
 
 use log::LevelFilter;
 use std::env;
-use std::io::{Read, Write};
-
-fn test_kcp() {
-    use crate::config::get_config;
-    use crate::kcp::KcpConnection;
-    use std::fs::File;
-    use std::thread;
-    match get_config().remote {
-        Some(ip) => thread::spawn(move || {
-            let mut connection = KcpConnection::with_endpoint(get_config().conv, ip).unwrap();
-            let mut file = File::create("sample-recv.mp4").unwrap();
-            connection.send(&[]).unwrap();
-            loop {
-                let recv = connection.recv();
-                if recv.is_empty() {
-                    log::info!("received complete");
-                    break;
-                }
-                file.write_all(&recv).unwrap();
-            }
-        }),
-        None => thread::spawn(|| {
-            let mut connection = KcpConnection::new(get_config().conv).unwrap();
-            let mut file = File::open("sample-big.mp4").unwrap();
-            let signal = connection.recv();
-            assert_eq!(signal.len(), 0);
-            log::info!("start sending...");
-            let mut buf = [0u8; 480];
-            loop {
-                let len = file.read(&mut buf).unwrap();
-                connection.send(&buf[..len]).unwrap();
-                if len == 0 {
-                    log::info!("send complete");
-                    break;
-                }
-            }
-        }),
-    };
-}
 
 fn main() {
     env_logger::Builder::new()
@@ -56,6 +18,24 @@ fn main() {
 
     config::load_config_from_file(config_path);
     kcp::init_kcp_scheduler();
-    test_kcp();
+    test();
     icmp::init_and_loop();
+}
+
+fn test() {
+    use crate::config::get_config;
+    use crate::kcp::KcpConnection;
+    use std::thread;
+    if let Some(remote) = get_config().remote {
+        thread::spawn(move || {
+            let mut connection = KcpConnection::connect(remote, 998244353).unwrap();
+            connection.send(b"hello, world!").unwrap();
+        });
+    } else {
+        thread::spawn(move || {
+            let mut connection = KcpConnection::incoming();
+            let packet = connection.recv();
+            log::info!("received packet: {:?}", packet);
+        });
+    }
 }
