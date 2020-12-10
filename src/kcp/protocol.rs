@@ -507,7 +507,6 @@ impl KcpControlBlock {
                 self.rt_prop_expired = true;
             } else if since + self.srtt <= self.current {
                 // Each gain cycle phase lasts for one RTT
-                self.bbr_state = BBRState::ProbeRTT(self.current, phase);
                 self.bbr_state =
                     BBRState::ProbeBW(self.current, (phase + 1) % KCP_GAIN_CYCLE.len());
             }
@@ -769,10 +768,13 @@ impl KcpControlBlock {
 
         if !self.rt_prop_queue.is_empty() && !self.btl_bw_queue.is_empty() {
             log::info!(
-                "{:?} rt prop {} btl bw {}",
+                "{:?} rt prop {}@{} btl bw {}@{} bdp {}",
                 self.bbr_state,
                 self.rt_prop_queue.front().unwrap().1,
-                self.btl_bw_queue.front().unwrap().1
+                self.rt_prop_queue.front().unwrap().0,
+                self.btl_bw_queue.front().unwrap().1,
+                self.btl_bw_queue.front().unwrap().0,
+                self.bdp()
             );
         }
 
