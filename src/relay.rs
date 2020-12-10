@@ -129,6 +129,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
             }
         }
         to.send(b"");
+        log::info!("done TCP -> KCP");
         Ok(())
     }
 
@@ -145,6 +146,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 to.write_all(&buf)?;
             }
         }
+        log::info!("done KCP -> TCP");
         Ok(())
     }
 }
