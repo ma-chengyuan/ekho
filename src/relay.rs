@@ -87,8 +87,8 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         s.spawn(|_| {
             if let Err(err) = forward_tcp_to_kcp(&mut tcp_read, &mut kcp_write, &should_stop) {
                 log::error!(
-                    "error forwarding traffic from {}(TCP) to {}(KCP): {}",
-                    tcp_read.peer_addr().unwrap(),
+                    "error forwarding traffic from {:?}(TCP) to {}(KCP): {}",
+                    tcp_read.peer_addr(),
                     kcp_write,
                     err
                 );
@@ -98,9 +98,9 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         s.spawn(|_| {
             if let Err(err) = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop) {
                 log::error!(
-                    "error forwarding traffic from {}(KCP) to {}(TCP): {}",
+                    "error forwarding traffic from {}(KCP) to {}(TCP): {:?}",
                     kcp_read,
-                    tcp_write.peer_addr().unwrap(),
+                    tcp_write.peer_addr(),
                     err
                 );
             }
@@ -129,7 +129,6 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
             }
         }
         to.send(b"");
-        log::info!("done TCP -> KCP");
         Ok(())
     }
 
@@ -146,7 +145,6 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 to.write_all(&buf)?;
             }
         }
-        log::info!("done KCP -> TCP");
         Ok(())
     }
 }
