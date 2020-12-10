@@ -476,6 +476,9 @@ impl KcpControlBlock {
                 }
                 self.btl_bw_queue.push_back((self.current, btl_bw));
             }
+            if !self.rt_prop_queue.is_empty() && !self.btl_bw_queue.is_empty() {
+                log::info!("{} {}", self.rt_prop_queue.front().unwrap().1, self.btl_bw_queue.front().unwrap().1);
+            }
         }
     }
 
