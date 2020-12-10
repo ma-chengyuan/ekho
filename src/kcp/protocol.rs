@@ -748,7 +748,7 @@ impl KcpControlBlock {
         // is stated in the original BBR paper. The original BBR uses two parameters: cwnd_gain
         // and pacing_gain. However, the effects of the two parameters are hard to distinguish when
         // packets are flushed. Thus, it may be better to merge the two parameters into one here.
-        let limit = if self.bbr_enabled {
+        let limit = max(if self.bbr_enabled {
             // OPTIMIZE: empirical tests have found the current limit to be a bit conservative.
             //  one solution might be to multiply the current limit with a small, configurable gain.
             match self.bbr_state {
@@ -764,8 +764,9 @@ impl KcpControlBlock {
             }
         } else {
             usize::max_value()
-        };
+        }, 1024);
 
+        /*
         if !self.rt_prop_queue.is_empty() && !self.btl_bw_queue.is_empty() {
             log::info!(
                 "{:?} rt prop {}@{} btl bw {}@{} bdp {}",
@@ -777,6 +778,7 @@ impl KcpControlBlock {
                 self.bdp()
             );
         }
+         */
 
         // Move segments from the send queue to the send buffer
         let cwnd = min(self.snd_wnd, self.rmt_wnd);

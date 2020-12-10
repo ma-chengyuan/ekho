@@ -92,8 +92,8 @@ fn test_file_download() {
 }
 
 pub fn run_client() {
-    test_file_download();
-    return;
+    // test_file_download();
+    // return;
     let listener = TcpListener::bind("127.0.0.1:23333").unwrap();
     for stream in listener.incoming() {
         thread::spawn(|| {
