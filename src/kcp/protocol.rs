@@ -244,6 +244,7 @@ pub struct KcpControlBlock {
 /// States for the BBR congestion control algorithm.
 ///
 /// Adapted from the appendix section of the original BBR paper.
+#[derive(Debug)]
 enum BBRState {
     /// Startup phase, in which BBR quickly discovers the bottleneck bandwidth.
     Startup,
@@ -475,9 +476,6 @@ impl KcpControlBlock {
                     self.btl_bw_queue.pop_back().unwrap();
                 }
                 self.btl_bw_queue.push_back((self.current, btl_bw));
-            }
-            if !self.rt_prop_queue.is_empty() && !self.btl_bw_queue.is_empty() {
-                log::info!("{} {}", self.rt_prop_queue.front().unwrap().1, self.btl_bw_queue.front().unwrap().1);
             }
         }
     }
@@ -768,6 +766,15 @@ impl KcpControlBlock {
         } else {
             usize::max_value()
         };
+
+        if !self.rt_prop_queue.is_empty() && !self.btl_bw_queue.is_empty() {
+            log::info!(
+                "{:?} rt prop {} btl bw {}",
+                self.bbr_state,
+                self.rt_prop_queue.front().unwrap().1,
+                self.btl_bw_queue.front().unwrap().1
+            );
+        }
 
         // Move segments from the send queue to the send buffer
         let cwnd = min(self.snd_wnd, self.rmt_wnd);

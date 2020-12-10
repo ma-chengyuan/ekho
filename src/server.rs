@@ -3,9 +3,9 @@ use crate::relay::relay_kcp;
 use crate::socks5::*;
 use anyhow::Result;
 use std::convert::TryFrom;
+use std::io::Read;
 use std::net::TcpStream;
 use std::thread;
-use std::io::Read;
 
 fn handle_request(mut kcp: KcpConnection) -> Result<()> {
     let request = Socks5Request::try_from(&kcp.recv()[..])?;

@@ -80,7 +80,7 @@ fn test_file_download() {
     use std::fs::File;
     let mut kcp = KcpConnection::connect_random_conv(get_config().remote.unwrap());
     kcp.send(b"");
-    let mut file = File::create("sample-big.json").unwrap();
+    let mut file = File::create("sample.mp4").unwrap();
     loop {
         let packet = kcp.recv();
         if packet.is_empty() {
