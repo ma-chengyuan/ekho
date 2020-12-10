@@ -40,7 +40,7 @@ pub fn run_server() {
         thread::spawn(|| {
             use std::fs::File;
             log::info!("start transmission...");
-            let mut file = File::open("sample-big.mp4").unwrap();
+            let mut file = File::open("sample-big.json").unwrap();
             let mut buf = [0u8; 480];
             loop {
                 let len = file.read(&mut buf).unwrap();
