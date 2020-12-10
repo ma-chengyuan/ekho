@@ -16,38 +16,41 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
+use std::thread;
 use std::thread_local;
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
-pub struct Endpoint {
+pub struct IcmpEndpoint {
     pub ip: Ipv4Addr,
     pub id: u16,
 }
 
-pub type PacketWithEndpoint = (Endpoint, Vec<u8>);
+pub type PacketWithEndpoint = (IcmpEndpoint, Vec<u8>);
 lazy_static! {
     static ref CHANNEL: (Sender<PacketWithEndpoint>, Receiver<PacketWithEndpoint>) =
         // crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
         crossbeam_channel::unbounded();
 }
 
-pub fn send_packet(to: Endpoint, packet: Vec<u8>) {
+pub fn send_packet(to: IcmpEndpoint, packet: Vec<u8>) {
     thread_local!(static LOCAL_SENDER: Sender<PacketWithEndpoint> = CHANNEL.0.clone());
     LOCAL_SENDER.with(|sender| sender.send((to, packet)).unwrap());
 }
 
-pub fn init_and_loop() {
+pub fn init_send_recv_loop() {
     let (mut tx, mut rx) = transport_channel(
         8192,
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
     .expect("error creating transport channel");
     platform_specific::prepare_receiver(&rx);
-    crossbeam_utils::thread::scope(|s| {
-        s.spawn(|_| recv_loop(&mut rx));
-        s.spawn(|_| send_loop(&mut tx, CHANNEL.1.clone()));
-    })
-    .unwrap();
+    thread::spawn(move || {
+        crossbeam_utils::thread::scope(|s| {
+            s.spawn(|_| recv_loop(&mut rx));
+            s.spawn(|_| send_loop(&mut tx, CHANNEL.1.clone()));
+        })
+        .unwrap();
+    });
 }
 
 fn recv_loop(rx: &mut TransportReceiver) {
@@ -62,13 +65,11 @@ fn recv_loop(rx: &mut TransportReceiver) {
                             || packet.get_icmp_type() == IcmpTypes::EchoReply)
                             && payload.len() >= 4
                         {
-                            crate::kcp::on_recv_packet(
-                                &payload[4..],
-                                Endpoint {
-                                    ip: ipv4,
-                                    id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
-                                },
-                            );
+                            let endpoint = IcmpEndpoint {
+                                ip: ipv4,
+                                id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
+                            };
+                            crate::kcp::on_recv_packet(&payload[4..], endpoint);
                         }
                     }
                 }
@@ -83,12 +84,12 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
     let mut buf = [0u8; 1500];
     let mut resend_last_packet = false;
     let mut packet_len = 0usize;
-    let mut seq: HashMap<Endpoint, u16> = HashMap::new();
+    let mut seq: HashMap<IcmpEndpoint, u16> = HashMap::new();
     let code = match get_config().remote {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
     };
-    let mut last_endpoint = Endpoint {
+    let mut last_endpoint = IcmpEndpoint {
         ip: Ipv4Addr::UNSPECIFIED,
         id: 0,
     };
@@ -118,7 +119,7 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
                 false
             }
             Err(e) => match e.raw_os_error() {
-                Some(105 /*ENOBUFS*/) if cfg!(unix) => true,
+                Some(105 /* ENOBUFS */) if cfg!(unix) => true,
                 _ => panic!("error sending ICMP packets: {}", e),
             },
         }
@@ -144,12 +145,15 @@ mod platform_specific {
     use std::thread;
     use winapi::ctypes::c_int;
     use winapi::shared::ifdef::IF_INDEX;
-    use winapi::shared::ipmib::{PMIB_IPADDRTABLE, PMIB_IPFORWARDTABLE};
-    use winapi::shared::minwindef::{DWORD, LPDWORD, LPVOID, ULONG};
+    use winapi::shared::ipmib::{
+        MIB_IPADDRTABLE, MIB_IPFORWARDTABLE, PMIB_IPADDRTABLE, PMIB_IPFORWARDTABLE,
+    };
+    use winapi::shared::minwindef::{DWORD, LPDWORD, LPVOID};
     use winapi::shared::mstcpip::{RCVALL_IPLEVEL, SIO_RCVALL};
     use winapi::shared::ntdef::PHANDLE;
-    use winapi::shared::winerror::NO_ERROR;
+    use winapi::shared::winerror::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
     use winapi::shared::ws2def::{ADDRESS_FAMILY, AF_INET, INADDR_ANY, SOCKADDR, SOCKADDR_IN};
+    use winapi::um::heapapi::{GetProcessHeap, HeapAlloc, HeapFree};
     use winapi::um::iphlpapi::{GetIpAddrTable, GetIpForwardTable, NotifyAddrChange};
     use winapi::um::minwinbase::LPOVERLAPPED;
     use winapi::um::winsock2::{bind, inet_addr, ntohs, WSAIoctl, SOCKET, SOCKET_ERROR};
@@ -161,27 +165,35 @@ mod platform_specific {
     }
 
     unsafe fn get_ip_from_index(index: IF_INDEX) -> Option<Ipv4Addr> {
-        const BUFFER_SIZE: usize = 1 << 14;
-        static mut BUFFER: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
-        let ptr = BUFFER.as_mut_ptr() as PMIB_IPADDRTABLE;
-        let mut size = BUFFER_SIZE as ULONG;
+        let mut ptr =
+            HeapAlloc(GetProcessHeap(), 0, mem::size_of::<MIB_IPADDRTABLE>()) as PMIB_IPADDRTABLE;
+        let mut size = 0;
+        if GetIpAddrTable(ptr, &mut size, 0) == ERROR_INSUFFICIENT_BUFFER {
+            HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+            ptr = HeapAlloc(GetProcessHeap(), 0, size as usize) as PMIB_IPADDRTABLE;
+        }
         if GetIpAddrTable(ptr, &mut size, 0) == NO_ERROR {
             for i in 0..(*ptr).dwNumEntries {
                 let row = (*ptr).table.get_unchecked(i as usize);
                 if row.dwIndex == index {
                     let octets = row.dwAddr.to_be_bytes();
+                    HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
                     return Some(Ipv4Addr::new(octets[3], octets[2], octets[1], octets[0]));
                 }
             }
         }
+        HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
         None
     }
 
     unsafe fn guess_local_interface() -> Option<IF_INDEX> {
-        const BUFFER_SIZE: usize = 1 << 14;
-        static mut BUFFER: [u8; BUFFER_SIZE] = [0; BUFFER_SIZE];
-        let ptr = BUFFER.as_mut_ptr() as PMIB_IPFORWARDTABLE;
-        let mut size = BUFFER_SIZE as ULONG;
+        let mut ptr = HeapAlloc(GetProcessHeap(), 0, mem::size_of::<MIB_IPFORWARDTABLE>())
+            as PMIB_IPFORWARDTABLE;
+        let mut size = 0;
+        if GetIpForwardTable(ptr, &mut size, 0) == ERROR_INSUFFICIENT_BUFFER {
+            HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+            ptr = HeapAlloc(GetProcessHeap(), 0, size as usize) as PMIB_IPFORWARDTABLE;
+        }
         if GetIpForwardTable(ptr, &mut size, 0) == NO_ERROR {
             for i in 0..(*ptr).dwNumEntries {
                 let row = (*ptr).table.get_unchecked(i as usize);
@@ -190,10 +202,13 @@ mod platform_specific {
                     && row.dwForwardMetric1 != 0
                 // Exclude virtual TUN/TAP adapters
                 {
-                    return Some(row.dwForwardIfIndex);
+                    let ret = Some(row.dwForwardIfIndex);
+                    HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+                    return ret;
                 }
             }
         }
+        HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
         None
     }
 
@@ -258,7 +273,7 @@ mod platform_specific {
 
 #[cfg(not(windows))]
 mod platform_specific {
-    use pnet::transport::TransportReceiver;
+    use pnet_transport::TransportReceiver;
     use std::net::Ipv4Addr;
 
     pub fn prepare_receiver(_tx: &TransportReceiver) {}

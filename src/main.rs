@@ -1,8 +1,12 @@
+mod client;
 mod config;
 mod icmp;
 mod kcp;
-mod protocol;
+mod relay;
+mod server;
+mod socks5;
 
+use crate::config::get_config;
 use log::LevelFilter;
 use std::env;
 
@@ -18,24 +22,10 @@ fn main() {
 
     config::load_config_from_file(config_path);
     kcp::init_kcp_scheduler();
-    test();
-    icmp::init_and_loop();
-}
-
-fn test() {
-    use crate::config::get_config;
-    use crate::kcp::KcpConnection;
-    use std::thread;
-    if let Some(remote) = get_config().remote {
-        thread::spawn(move || {
-            let mut connection = KcpConnection::connect(remote, 998244353).unwrap();
-            connection.send(b"hello, world!").unwrap();
-        });
+    icmp::init_send_recv_loop();
+    if get_config().remote.is_none() {
+        server::run_server();
     } else {
-        thread::spawn(move || {
-            let mut connection = KcpConnection::incoming();
-            let packet = connection.recv();
-            log::info!("received packet: {:?}", packet);
-        });
+        client::run_client();
     }
 }

@@ -22,7 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //!
 //! This is adapted from the original C implementation, but slightly oxidized and optimized for
 //! large send / receive windows. Optimizations currently include using B Tree as the data structure
-//! behind receive buffers (as opposed to naive linked list in original implementation) and using
+//! behind receive buffers (as opposed to a naive linked list in original implementation) and using
 //! the BBR congestion control algorithm instead of the naive loss-based congestion control.
 //!
 //! This is 100% compatible with other KCP implementations.
@@ -31,57 +31,25 @@ use bytes::{Buf, BufMut};
 use std::cmp::{max, min, Ordering};
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::TryInto;
-use std::error::Error;
-use std::fmt::Display;
+use thiserror::Error;
 
 /// KCP error type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Error)]
 pub enum KcpError {
-    /// The message to be sent is too large even with fragmentation.
-    SendPacketTooLarge,
-    /// Input data is so short that it can't be a valid KCP packet.
-    InvalidKcpPacket,
-    /// Command not supported.
-    UnsupportedCommand(u8),
-    /// No packet is available in receive queue.
+    #[error("the packet to be sent is too large to be fragmented")]
+    OversizePacket,
+    #[error("invalid KCP packet")]
+    IncompletePacket,
+    #[error("invalid KCP command: {0}")]
+    InvalidCommand(u8),
+    #[error("empty queue (try again later)")]
     NotAvailable,
-    /// Wrong conversation ID.
+    #[error("wrong conv. (expected {expected}, found {found})")]
     WrongConv { expected: u32, found: u32 },
 }
 
-impl Error for KcpError {}
-
-impl Display for KcpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KcpError::SendPacketTooLarge => write!(f, "send packet too large"),
-            KcpError::InvalidKcpPacket => write!(f, "invalid kcp packet"),
-            KcpError::UnsupportedCommand(cmd) => write!(f, "unsupported command: {}", cmd),
-            KcpError::NotAvailable => write!(f, "empty queue (try again later)"),
-            KcpError::WrongConv { expected, found } => {
-                write!(f, "wrong conv (expected {}, found {})", expected, found)
-            }
-        }
-    }
-}
-
-impl From<KcpError> for std::io::Error {
-    fn from(kcp: KcpError) -> Self {
-        use std::io::ErrorKind;
-        let message = format!("{}", &kcp);
-        let kind = match kcp {
-            KcpError::SendPacketTooLarge => ErrorKind::InvalidInput,
-            KcpError::InvalidKcpPacket => ErrorKind::InvalidData,
-            KcpError::NotAvailable => ErrorKind::WouldBlock,
-            KcpError::UnsupportedCommand(_) => ErrorKind::InvalidData,
-            KcpError::WrongConv { .. } => ErrorKind::InvalidData,
-        };
-        std::io::Error::new(kind, message)
-    }
-}
-
 /// The result type for KCP operations.
-type Result<T> = std::result::Result<T, KcpError>;
+pub(crate) type Result<T> = std::result::Result<T, KcpError>;
 
 /// The overhead imposed by KCP per packet (aka. packet header length).
 const KCP_OVERHEAD: u32 = 24;
@@ -387,8 +355,7 @@ impl KcpControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
-    pub fn send(&mut self, mut buf: &[u8]) -> Result<usize> {
-        let mut sent = 0;
+    pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
         if self.stream {
             if let Some(old) = self.snd_queue.back_mut() {
                 if old.payload.len() < self.mss as usize {
@@ -398,10 +365,9 @@ impl KcpControlBlock {
                     old.payload.extend_from_slice(front);
                     old.frg = 0;
                     buf = back;
-                    sent += extend;
                 }
                 if buf.is_empty() {
-                    return Ok(sent);
+                    return Ok(());
                 }
             }
         }
@@ -411,7 +377,7 @@ impl KcpControlBlock {
             (buf.len() + self.mss as usize - 1) / self.mss as usize
         };
         if count > KCP_MAX_FRAGMENTS as usize {
-            return Err(KcpError::SendPacketTooLarge);
+            return Err(KcpError::OversizePacket);
         }
         assert!(count > 0);
         for i in 0..count {
@@ -426,10 +392,9 @@ impl KcpControlBlock {
                 payload: front.into(),
                 ..Default::default()
             });
-            sent += size;
             buf = back;
         }
-        Ok(sent)
+        Ok(())
     }
 
     /// Updates the RTT filter and recalculates RTO according to RFC 6298.
@@ -627,7 +592,7 @@ impl KcpControlBlock {
         let mut ts_max_ack = 0;
 
         if data.len() < KCP_OVERHEAD as usize {
-            return Err(KcpError::InvalidKcpPacket);
+            return Err(KcpError::IncompletePacket);
         }
 
         loop {
@@ -652,14 +617,14 @@ impl KcpControlBlock {
             let len = header.get_u32_le() as usize;
             data = body;
             if data.len() < len {
-                return Err(KcpError::InvalidKcpPacket);
+                return Err(KcpError::IncompletePacket);
             }
             if cmd != KCP_CMD_PUSH
                 && cmd != KCP_CMD_ACK
                 && cmd != KCP_CMD_WND_ASK
                 && cmd != KCP_CMD_WND_TELL
             {
-                return Err(KcpError::UnsupportedCommand(cmd));
+                return Err(KcpError::InvalidCommand(cmd));
             }
             self.rmt_wnd = wnd;
             self.ack_packets_before_una(una);

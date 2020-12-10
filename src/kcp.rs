@@ -1,8 +1,30 @@
+/*
+Copyright 2020 Chengyuan Ma
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sub-
+-license, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-
+-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
+//! The layer that integrates the algorithmic part of KCP with the ICMP foundation.
+
 use crate::config::get_config;
-use crate::icmp::Endpoint;
+use crate::icmp::IcmpEndpoint;
 
 mod protocol;
 
+use crate::kcp::protocol::KcpError;
 use chacha20poly1305::aead::{Aead, AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use crossbeam_channel::{Receiver, Sender};
@@ -11,9 +33,10 @@ use lazy_static::lazy_static;
 use parking_lot::{Condvar, Mutex, RwLock};
 use priority_queue::PriorityQueue;
 use protocol::KcpControlBlock;
+use rand::Rng;
 use std::cmp::Reverse;
+use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::io::{Error, ErrorKind, Result};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,9 +44,10 @@ use std::time::{Duration, Instant};
 struct KcpConnectionState {
     control: Mutex<KcpControlBlock>,
     condvar: Condvar,
-    endpoint: RwLock<Endpoint>,
+    endpoint: RwLock<IcmpEndpoint>,
 }
 
+#[derive(Clone)]
 pub struct KcpConnection {
     state: Arc<KcpConnectionState>,
 }
@@ -45,7 +69,8 @@ impl Hash for KcpSchedulerItem {
 }
 
 lazy_static! {
-    static ref CONNECTION_STATE: DashMap<(Endpoint, u32), Arc<KcpConnectionState>> = DashMap::new();
+    static ref CONNECTION_STATE: DashMap<(IcmpEndpoint, u32), Arc<KcpConnectionState>> =
+        DashMap::new();
     static ref UPDATE_SCHEDULE: Mutex<PriorityQueue<KcpSchedulerItem, Reverse<u32>>> =
         Mutex::new(PriorityQueue::new());
     static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&get_config().key);
@@ -82,7 +107,7 @@ pub fn init_kcp_scheduler() {
                             if CIPHER.encrypt_in_place(&NONCE, b"", &mut packet).is_ok() {
                                 crate::icmp::send_packet(*endpoint, packet);
                             } else {
-                                log::error!("error encrypting packet");
+                                log::error!("error encrypting KCP/ICMP packet");
                             }
                         }
                     }
@@ -100,9 +125,9 @@ impl KcpConnection {
         INCOMING.1.recv().unwrap()
     }
 
-    pub fn connect(endpoint: Endpoint, conv: u32) -> Result<Self> {
+    pub fn connect(endpoint: IcmpEndpoint, conv: u32) -> Option<Self> {
         if CONNECTION_STATE.contains_key(&(endpoint, conv)) {
-            return Err(Error::from(ErrorKind::AddrInUse));
+            return None;
         }
         let state = Arc::new(KcpConnectionState {
             control: Mutex::new(KcpControlBlock::new(conv)),
@@ -121,31 +146,54 @@ impl KcpConnection {
             kcp.set_rto_min(config.rto_min);
         }
         CONNECTION_STATE.insert((endpoint, conv), state.clone());
-        Ok(KcpConnection { state })
+        Some(KcpConnection { state })
     }
 
-    pub fn send(&mut self, data: &[u8]) -> Result<usize> {
-        let sent;
+    pub fn connect_random_conv(endpoint: IcmpEndpoint) -> Self {
+        let mut rng = rand::thread_rng();
+        let mut ret = Self::connect(endpoint, rng.gen());
+        while ret.is_none() {
+            ret = Self::connect(endpoint, rng.gen());
+        }
+        ret.unwrap()
+    }
+
+    pub fn send(&mut self, data: &[u8]) {
         {
             let mut kcp = self.state.control.lock();
             let max_send = get_config().kcp.send_window_size as usize * 2;
             while kcp.wait_send() > max_send {
                 self.state.condvar.wait(&mut kcp);
             }
-            sent = kcp.send(data).map_err(Error::from)?;
+            kcp.send(data).unwrap();
         }
         schedule_immediate_update(self.state.clone());
-        Ok(sent)
     }
 
     pub fn recv(&mut self) -> Vec<u8> {
         let mut kcp = self.state.control.lock();
         let mut result = kcp.recv();
-        while result.is_err() {
+        while let Err(KcpError::NotAvailable) = result {
             self.state.condvar.wait(&mut kcp);
             result = kcp.recv();
         }
         result.unwrap()
+    }
+
+    pub fn recv_with_timeout(&mut self, timeout: Duration) -> Option<Vec<u8>> {
+        let mut kcp = self.state.control.lock();
+        let mut result = kcp.recv();
+        let until = Instant::now().checked_add(timeout).unwrap();
+        while let Err(KcpError::NotAvailable) = result {
+            if self.state.condvar.wait_until(&mut kcp, until).timed_out() {
+                break;
+            }
+            result = kcp.recv();
+        }
+        match result {
+            Err(KcpError::NotAvailable) => None,
+            _ => Some(result.unwrap()),
+        }
     }
 
     pub fn flush(&mut self) {
@@ -164,13 +212,24 @@ impl Drop for KcpConnection {
     }
 }
 
-pub fn on_recv_packet(packet: &[u8], from: Endpoint) {
+impl fmt::Display for KcpConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        {
+            let endpoint = self.state.endpoint.read();
+            write!(f, "{}:{}", endpoint.ip, endpoint.id)?;
+        }
+        let conv = self.state.control.lock().conv();
+        write!(f, "@{}", conv)
+    }
+}
+
+pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
     if let Ok(packet) = CIPHER.decrypt(&NONCE, packet) {
         let conv = KcpControlBlock::conv_from_raw(&packet);
         if !CONNECTION_STATE.contains_key(&(from, conv)) {
             let new_connection = KcpConnection::connect(from, conv).unwrap();
             if let Err(e) = INCOMING.0.send(new_connection) {
-                log::error!("error passively creating new KCP connection: {}", e);
+                log::error!("error adding incoming connection to the queue: {}", e);
             }
         }
         if let Some(state) = CONNECTION_STATE.get(&(from, conv)) {

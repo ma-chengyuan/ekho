@@ -1,14 +1,15 @@
-use crate::icmp::Endpoint;
+use crate::icmp::IcmpEndpoint;
 use chacha20poly1305::Key;
 use once_cell::sync::OnceCell;
 use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer};
+use std::fmt;
 use std::path::Path;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
     #[serde(default)]
-    pub remote: Option<Endpoint>,
+    pub remote: Option<IcmpEndpoint>,
     pub kcp: KcpConfig,
     #[serde(deserialize_with = "deserialize_key")]
     pub key: Key,
@@ -43,7 +44,7 @@ fn deserialize_key<'de, D: Deserializer<'de>>(d: D) -> Result<Key, D::Error> {
     impl<'de> Visitor<'de> for HexKeyVisitor {
         type Value = Key;
 
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
             write!(formatter, "a length-64 hex string describing the key")
         }
 
