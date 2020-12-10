@@ -8,6 +8,7 @@ use std::thread;
 
 fn handle_request(mut kcp: KcpConnection) -> Result<()> {
     let request = Socks5Request::try_from(&kcp.recv()[..])?;
+    log::info!("received request to {}", request.dst);
     match request.cmd {
         Socks5Command::Connect => match TcpStream::connect(&request.dst) {
             Ok(remote) => {

@@ -108,6 +108,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         });
     })
     .unwrap();
+    log::info!("relay stopped");
     return Ok(());
 
     fn forward_tcp_to_kcp(

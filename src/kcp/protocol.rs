@@ -28,6 +28,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //! This is 100% compatible with other KCP implementations.
 
 use bytes::{Buf, BufMut};
+use rand::{thread_rng, Rng};
 use std::cmp::{max, min, Ordering};
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::TryInto;
@@ -494,8 +495,9 @@ impl KcpControlBlock {
             }
         } else if let BBRState::Drain = self.bbr_state {
             if self.inflight <= self.bdp() {
-                // TODO: add random phase initialization
-                self.bbr_state = BBRState::ProbeBW(self.current, 0);
+                let phase: usize = thread_rng().gen_range(0, 7);
+                self.bbr_state =
+                    BBRState::ProbeBW(self.current, if phase >= 1 { phase + 1 } else { phase });
             }
         } else if let BBRState::ProbeBW(since, phase) = self.bbr_state {
             let last_rt_prop_update = self.rt_prop_queue.front().unwrap().0;
