@@ -86,23 +86,13 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
     crossbeam_utils::thread::scope(|s| {
         s.spawn(|_| {
             if let Err(err) = forward_tcp_to_kcp(&mut tcp_read, &mut kcp_write, &should_stop) {
-                log::error!(
-                    "error forwarding traffic from {:?}(TCP) to {}(KCP): {}",
-                    tcp_read.peer_addr(),
-                    kcp_write,
-                    err
-                );
+                log::error!("{}", err);
             }
             should_stop.store(true, Ordering::Relaxed);
         });
         s.spawn(|_| {
             if let Err(err) = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop) {
-                log::error!(
-                    "error forwarding traffic from {}(KCP) to {}(TCP): {:?}",
-                    kcp_read,
-                    tcp_write.peer_addr(),
-                    err
-                );
+                log::error!("{}", err);
             }
             should_stop.store(true, Ordering::Relaxed);
         });
