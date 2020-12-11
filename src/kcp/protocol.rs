@@ -762,8 +762,8 @@ impl KcpControlBlock {
             };
             // Empirical tests have found the current limit to be a bit conservative. One solution
             // might be to multiply the current limit with a small, configurable gain.
-            // Here the gain is 1.1
-            limit * 1126 / 1024
+            // Here the gain is 1.25
+            limit * 5 / 4
         } else {
             usize::max_value()
         };
