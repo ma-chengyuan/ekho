@@ -748,23 +748,26 @@ impl KcpControlBlock {
         // is stated in the original BBR paper. The original BBR uses two parameters: cwnd_gain
         // and pacing_gain. However, the effects of the two parameters are hard to distinguish when
         // packets are flushed. Thus, it may be better to merge the two parameters into one here.
-        let limit = max(if self.bbr_enabled {
-            // OPTIMIZE: empirical tests have found the current limit to be a bit conservative.
-            //  one solution might be to multiply the current limit with a small, configurable gain.
-            match self.bbr_state {
-                BBRState::Startup => self.bdp() * 2955 / 1024, /* 2 / ln2 */
-                // ln2 / 2 is the value of pacing_gain. Given the current state machine logic in
-                // update_bbr_state, this value stops KCP from sending anything.
-                BBRState::Drain => self.bdp() * 355 / 1024, /* ln2 / 2 */
-                BBRState::ProbeBW(_, phase) => self.bdp() * KCP_GAIN_CYCLE[phase] / 4,
-                // OPTIMIZE: according to BBRv2, half BDP seems to be a better limit in ProbeRTT
-                //  phase. Considering that the current limit does not significantly impose a
-                //  penalty to throughput, I'll keep the current limit.
-                BBRState::ProbeRTT(_, _) => 4 * self.mtu as usize,
-            }
-        } else {
-            usize::max_value()
-        }, 1024);
+        let limit = max(
+            if self.bbr_enabled {
+                // OPTIMIZE: empirical tests have found the current limit to be a bit conservative.
+                //  one solution might be to multiply the current limit with a small, configurable gain.
+                match self.bbr_state {
+                    BBRState::Startup => self.bdp() * 2955 / 1024, /* 2 / ln2 */
+                    // ln2 / 2 is the value of pacing_gain. Given the current state machine logic in
+                    // update_bbr_state, this value stops KCP from sending anything.
+                    BBRState::Drain => self.bdp() * 355 / 1024, /* ln2 / 2 */
+                    BBRState::ProbeBW(_, phase) => self.bdp() * KCP_GAIN_CYCLE[phase] / 4,
+                    // OPTIMIZE: according to BBRv2, half BDP seems to be a better limit in ProbeRTT
+                    //  phase. Considering that the current limit does not significantly impose a
+                    //  penalty to throughput, I'll keep the current limit.
+                    BBRState::ProbeRTT(_, _) => 4 * self.mtu as usize,
+                }
+            } else {
+                usize::max_value()
+            },
+            1024,
+        );
 
         /*
         if !self.rt_prop_queue.is_empty() && !self.btl_bw_queue.is_empty() {

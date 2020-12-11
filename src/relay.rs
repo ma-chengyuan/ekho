@@ -78,6 +78,11 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         tcp.peer_addr()?,
         kcp
     );
+    let stop_message = format!(
+        "relay stopped between {} (TCP) and {} (KCP)",
+        tcp.peer_addr()?,
+        kcp
+    );
     let mut tcp_read = tcp;
     let mut tcp_write = tcp_read.try_clone()?;
     let mut kcp_read = kcp;
@@ -98,7 +103,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         });
     })
     .unwrap();
-    log::info!("relay stopped");
+    log::info!("{}", stop_message);
     return Ok(());
 
     fn forward_tcp_to_kcp(

@@ -50,7 +50,7 @@ fn handle_socks(mut local: TcpStream) -> Result<()> {
                     }
                 }
             } else {
-                let mut kcp = KcpConnection::connect_random_conv(get_config().remote.unwrap());
+                let mut kcp = KcpConnection::connect(get_config().remote.unwrap());
                 kcp.send(&Vec::<u8>::from(&request));
                 let reply = Socks5Reply::try_from(&kcp.recv()[..])?;
                 local
@@ -78,7 +78,7 @@ pub fn connect_directly(_addr: &Socks5SocketAddr) -> bool {
 
 fn test_file_download() {
     use std::fs::File;
-    let mut kcp = KcpConnection::connect_random_conv(get_config().remote.unwrap());
+    let mut kcp = KcpConnection::connect(get_config().remote.unwrap());
     kcp.send(b"");
     let mut file = File::create("sample.mp4").unwrap();
     loop {

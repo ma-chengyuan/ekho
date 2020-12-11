@@ -125,7 +125,7 @@ impl KcpConnection {
         INCOMING.1.recv().unwrap()
     }
 
-    pub fn connect(endpoint: IcmpEndpoint, conv: u32) -> Option<Self> {
+    pub fn connect_with_conv(endpoint: IcmpEndpoint, conv: u32) -> Option<Self> {
         if CONNECTION_STATE.contains_key(&(endpoint, conv)) {
             return None;
         }
@@ -149,11 +149,11 @@ impl KcpConnection {
         Some(KcpConnection { state })
     }
 
-    pub fn connect_random_conv(endpoint: IcmpEndpoint) -> Self {
+    pub fn connect(endpoint: IcmpEndpoint) -> Self {
         let mut rng = rand::thread_rng();
-        let mut ret = Self::connect(endpoint, rng.gen());
+        let mut ret = Self::connect_with_conv(endpoint, rng.gen());
         while ret.is_none() {
-            ret = Self::connect(endpoint, rng.gen());
+            ret = Self::connect_with_conv(endpoint, rng.gen());
         }
         ret.unwrap()
     }
@@ -227,7 +227,7 @@ pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
     if let Ok(packet) = CIPHER.decrypt(&NONCE, packet) {
         let conv = KcpControlBlock::conv_from_raw(&packet);
         if !CONNECTION_STATE.contains_key(&(from, conv)) {
-            let new_connection = KcpConnection::connect(from, conv).unwrap();
+            let new_connection = KcpConnection::connect_with_conv(from, conv).unwrap();
             if let Err(e) = INCOMING.0.send(new_connection) {
                 log::error!("error adding incoming connection to the queue: {}", e);
             }
