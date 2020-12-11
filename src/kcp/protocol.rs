@@ -1016,15 +1016,20 @@ impl KcpControlBlock {
     }
 
     pub fn first_push_packet(mut buf: &[u8]) -> bool {
-        if buf.len() <= KCP_OVERHEAD as usize {
-            return false;
+        while buf.len() >= KCP_OVERHEAD as usize {
+            let _conv = buf.get_u32_le();
+            let cmd = buf.get_u8();
+            let _frg = buf.get_u8();
+            let _wnd = buf.get_u16_le();
+            let _ts = buf.get_u32_le();
+            let sn = buf.get_u32_le();
+            let _una = buf.get_u32_le();
+            let len = buf.get_u32_le() as usize;
+            if cmd == KCP_CMD_PUSH {
+                return sn == 0;
+            }
+            buf = &buf[len..];
         }
-        let _conv = buf.get_u32_le();
-        let cmd = buf.get_u8();
-        let _frg = buf.get_u8();
-        let _wnd = buf.get_u16_le();
-        let _ts = buf.get_u32_le();
-        let sn = buf.get_u32_le();
-        cmd == KCP_CMD_PUSH && sn == 0
+        true
     }
 }
