@@ -102,8 +102,6 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                     err
                 );
             }
-            kcp_write.send(b"");
-            kcp_write.flush();
             should_stop.store(true, Ordering::SeqCst);
         });
         s.spawn(|_| {
@@ -145,6 +143,8 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         }
         if !should_stop.load(Ordering::SeqCst) {
             log::debug!("TCP side closes the connection: {}", from.peer_addr()?);
+            to.send(b"");
+            to.flush();
         }
         Ok(())
     }
