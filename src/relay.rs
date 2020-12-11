@@ -91,13 +91,13 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
     crossbeam_utils::thread::scope(|s| {
         s.spawn(|_| {
             if let Err(err) = forward_tcp_to_kcp(&mut tcp_read, &mut kcp_write, &should_stop) {
-                log::error!("{}", err);
+                log::error!("error forwarding TCP to KCP: {}", err);
             }
             should_stop.store(true, Ordering::Relaxed);
         });
         s.spawn(|_| {
             if let Err(err) = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop) {
-                log::error!("{}", err);
+                log::error!("error forwarding KCP to TCP: {}", err);
             }
             should_stop.store(true, Ordering::Relaxed);
         });
@@ -122,9 +122,12 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 Ok(len) => to.send(&buf[..len]),
                 Err(err) => handle_io_error(err)?,
             }
+            log::debug!("TCP recv heartbeat");
         }
-        to.send(b"");
         log::debug!("TCP side closes the connection: {}", from.peer_addr()?);
+        to.send(b"");
+        to.flush();
+        log::debug!("KCP side signal sent: {}", from.peer_addr()?);
         Ok(())
     }
 
@@ -140,6 +143,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 }
                 to.write_all(&buf)?;
             }
+            log::debug!("KCP recv heartbeat");
         }
         log::debug!("KCP side closes the connection: {}", from);
         Ok(())

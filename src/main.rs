@@ -27,7 +27,7 @@ fn main() {
     icmp::init_send_recv_loop();
     if get_config().remote.is_none() {
         server::run_server();
-        // server::test_file_upload();
+    // server::test_file_upload();
     } else {
         client::run_client();
         // client::test_file_download();

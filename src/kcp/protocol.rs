@@ -1051,7 +1051,10 @@ impl KcpControlBlock {
             let sn = buf.get_u32_le();
             let una = buf.get_u32_le();
             let len = buf.get_u32_le() as usize;
-            let common = format!("frg {} wnd {} ts {} sn {} una {} len {}", frg, wnd, ts, sn, una, len);
+            let common = format!(
+                "frg {} wnd {} ts {} sn {} una {} len {}",
+                frg, wnd, ts, sn, una, len
+            );
             match cmd {
                 KCP_CMD_PUSH => log::debug!("  PUSH {}", common),
                 KCP_CMD_ACK => log::debug!("  ACK {}", common),

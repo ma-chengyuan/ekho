@@ -72,9 +72,9 @@ fn handle_socks(mut local: TcpStream) -> Result<()> {
                             break;
                         }
                     }
-
                 });
-            }).unwrap();
+            })
+            .unwrap();
         }
         _ => {
             local

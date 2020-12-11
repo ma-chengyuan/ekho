@@ -255,7 +255,7 @@ impl From<&Socks5Reply> for Vec<u8> {
 pub struct Socks5UdpEncapsulation {
     pub frag: u8,
     pub dst: Socks5SocketAddr,
-    pub data: Vec<u8>
+    pub data: Vec<u8>,
 }
 
 impl TryFrom<&[u8]> for Socks5UdpEncapsulation {
@@ -274,7 +274,7 @@ impl TryFrom<&[u8]> for Socks5UdpEncapsulation {
         };
         let dst = Socks5SocketAddr::try_from(&buf[3..3 + addr_len])?;
         let data = Vec::from(&buf[3 + addr_len..]);
-        Ok(Socks5UdpEncapsulation{frag, dst, data})
+        Ok(Socks5UdpEncapsulation { frag, dst, data })
     }
 }
 

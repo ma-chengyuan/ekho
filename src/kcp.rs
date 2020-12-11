@@ -37,6 +37,7 @@ use rand::Rng;
 use std::cmp::Reverse;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,8 +48,8 @@ struct KcpConnectionState {
     endpoint: RwLock<IcmpEndpoint>,
 }
 
-#[derive(Clone)]
 pub struct KcpConnection {
+    count: Arc<AtomicUsize>,
     state: Arc<KcpConnectionState>,
 }
 
@@ -147,7 +148,10 @@ impl KcpConnection {
             kcp.set_rto_min(config.rto_min);
         }
         CONNECTION_STATE.insert((endpoint, conv), state.clone());
-        Some(KcpConnection { state })
+        Some(KcpConnection {
+            count: Arc::new(AtomicUsize::new(0)),
+            state,
+        })
     }
 
     pub fn connect(endpoint: IcmpEndpoint) -> Self {
@@ -210,12 +214,30 @@ impl KcpConnection {
     }
 }
 
+impl Clone for KcpConnection {
+    fn clone(&self) -> Self {
+        let cnt = self.count.load(Ordering::SeqCst);
+        self.count.store(cnt + 1, Ordering::SeqCst);
+        KcpConnection {
+            count: self.count.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
 impl Drop for KcpConnection {
     fn drop(&mut self) {
-        self.flush();
-        let conv = self.state.control.lock().conv();
-        CONNECTION_STATE.remove(&(*self.state.endpoint.read(), conv));
-        log::debug!("KCP connection closed, {} remaining", CONNECTION_STATE.len());
+        let cnt = self.count.load(Ordering::SeqCst);
+        self.count.store(cnt - 1, Ordering::SeqCst);
+        if cnt == 1 {
+            self.flush();
+            let conv = self.state.control.lock().conv();
+            CONNECTION_STATE.remove(&(*self.state.endpoint.read(), conv));
+            log::debug!(
+                "KCP connection closed, {} remaining",
+                CONNECTION_STATE.len()
+            );
+        }
     }
 }
 
