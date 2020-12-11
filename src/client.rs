@@ -5,7 +5,7 @@ use crate::socks5::*;
 use anyhow::{bail, Context, Result};
 use std::convert::TryFrom;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::thread;
 
 fn handle_socks(mut local: TcpStream) -> Result<()> {
@@ -60,6 +60,21 @@ fn handle_socks(mut local: TcpStream) -> Result<()> {
                     relay_kcp(local, kcp)?;
                 }
             }
+        }
+        Socks5Command::UdpAssociate => {
+            let udp = UdpSocket::bind("127.0.0.1:0")?;
+            crossbeam_utils::thread::scope(|s| {
+                s.spawn(move |_| {
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        let len = local.read(&mut buf).unwrap();
+                        if len == 0 {
+                            break;
+                        }
+                    }
+
+                });
+            }).unwrap();
         }
         _ => {
             local

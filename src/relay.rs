@@ -124,6 +124,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
             }
         }
         to.send(b"");
+        log::debug!("TCP side closes the connection: {}", from.peer_addr()?);
         Ok(())
     }
 
@@ -140,6 +141,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 to.write_all(&buf)?;
             }
         }
+        log::debug!("KCP side closes the connection: {}", from);
         Ok(())
     }
 }

@@ -5,7 +5,10 @@ use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use thiserror::Error;
 
-pub const SOCKS5_VERSION: u8 = 5;
+pub const SOCKS5_VERSION: u8 = 0x05;
+const ATYP_IPV4: u8 = 0x01;
+const ATYP_DOMAIN_NAME: u8 = 0x03;
+const ATYP_IPV6: u8 = 0x04;
 
 #[derive(Debug, Error)]
 pub enum Socks5ParseError {
@@ -69,15 +72,15 @@ impl TryFrom<&[u8]> for Socks5Addr {
         }
         let ret: Socks5Addr;
         match buf[0] {
-            0x01 if buf.len() == 5 => {
+            ATYP_IPV4 if buf.len() == 5 => {
                 let octets: [u8; 4] = buf[1..].try_into().unwrap();
                 ret = Socks5Addr::Ip(IpAddr::from(octets));
             }
-            0x04 if buf.len() == 17 => {
+            ATYP_IPV6 if buf.len() == 17 => {
                 let octets: [u8; 16] = buf[1..].try_into().unwrap();
                 ret = Socks5Addr::Ip(IpAddr::from(octets));
             }
-            0x03 if buf.len() >= 2 && buf.len() == (2 + buf[1]) as usize => {
+            ATYP_DOMAIN_NAME if buf.len() >= 2 && buf.len() == (2 + buf[1]) as usize => {
                 let domain = String::from_utf8_lossy(&buf[2..(2 + buf[1]) as usize]);
                 ret = Socks5Addr::Hostname(domain.parse().unwrap());
             }
@@ -93,18 +96,18 @@ impl From<&Socks5Addr> for Vec<u8> {
         match addr {
             Socks5Addr::Ip(IpAddr::V4(ipv4)) => {
                 ret = Vec::with_capacity(5);
-                ret.push(0x01);
+                ret.push(ATYP_IPV4);
                 ret.extend_from_slice(&ipv4.octets());
             }
             Socks5Addr::Ip(IpAddr::V6(ipv6)) => {
                 ret = Vec::with_capacity(17);
-                ret.push(0x04);
+                ret.push(ATYP_IPV6);
                 ret.extend_from_slice(&ipv6.octets());
             }
             Socks5Addr::Hostname(str) => {
                 let lossy = str.as_bytes();
                 ret = Vec::with_capacity(2 + lossy.len());
-                ret.push(0x03);
+                ret.push(ATYP_DOMAIN_NAME);
                 ret.push(lossy.len() as u8);
                 ret.extend_from_slice(lossy);
             }
@@ -246,5 +249,40 @@ impl From<&Socks5Reply> for Vec<u8> {
                 ret
             }
         }
+    }
+}
+
+pub struct Socks5UdpEncapsulation {
+    pub frag: u8,
+    pub dst: Socks5SocketAddr,
+    pub data: Vec<u8>
+}
+
+impl TryFrom<&[u8]> for Socks5UdpEncapsulation {
+    type Error = Socks5ParseError;
+
+    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+        if buf.len() <= 4 {
+            return Err(Socks5ParseError::InvalidLength);
+        }
+        let frag = buf[2];
+        let addr_len = match buf[3] {
+            ATYP_IPV4 => 5,
+            ATYP_DOMAIN_NAME => buf[4] as usize + 2,
+            ATYP_IPV6 => 17,
+            _ => return Err(Socks5ParseError::InvalidLength),
+        };
+        let dst = Socks5SocketAddr::try_from(&buf[3..3 + addr_len])?;
+        let data = Vec::from(&buf[3 + addr_len..]);
+        Ok(Socks5UdpEncapsulation{frag, dst, data})
+    }
+}
+
+impl From<&Socks5UdpEncapsulation> for Vec<u8> {
+    fn from(udp: &Socks5UdpEncapsulation) -> Self {
+        let mut ret = vec![0, 0, udp.frag];
+        ret.extend(Vec::<u8>::from(&udp.dst));
+        ret.extend(&udp.data);
+        ret
     }
 }

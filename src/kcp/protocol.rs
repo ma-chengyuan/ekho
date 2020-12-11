@@ -768,9 +768,8 @@ impl KcpControlBlock {
             usize::max_value()
         };
 
-        /*
         if !self.rt_prop_queue.is_empty() && !self.btl_bw_queue.is_empty() {
-            log::info!(
+            log::trace!(
                 "{:?} rt prop {}@{} btl bw {}@{} bdp {}",
                 self.bbr_state,
                 self.rt_prop_queue.front().unwrap().1,
@@ -780,7 +779,6 @@ impl KcpControlBlock {
                 self.bdp()
             );
         }
-         */
 
         // Move segments from the send queue to the send buffer
         let cwnd = min(self.snd_wnd, self.rmt_wnd);
