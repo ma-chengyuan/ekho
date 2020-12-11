@@ -79,9 +79,9 @@ lazy_static! {
         crossbeam_channel::unbounded();
 }
 
-fn schedule_immediate_update(target: Arc<KcpConnectionState>) {
+fn schedule_immediate_update(target: &Arc<KcpConnectionState>) {
     let mut guard = UPDATE_SCHEDULE.lock();
-    guard.push_increase(KcpSchedulerItem(Arc::downgrade(&target)), Reverse(0));
+    guard.push_increase(KcpSchedulerItem(Arc::downgrade(target)), Reverse(0));
 }
 
 pub fn init_kcp_scheduler() {
@@ -173,7 +173,7 @@ impl KcpConnection {
             }
             kcp.send(data).unwrap();
         }
-        schedule_immediate_update(self.state.clone());
+        schedule_immediate_update(&self.state);
     }
 
     pub fn recv(&mut self) -> Vec<u8> {
@@ -262,7 +262,7 @@ pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
                 }
                 state.condvar.notify_all();
             }
-            schedule_immediate_update(state.clone());
+            schedule_immediate_update(&state);
         }
     } else {
         // TODO: Maybe simulate real ping behavior?
