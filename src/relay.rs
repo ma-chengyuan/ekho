@@ -91,13 +91,33 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
     crossbeam_utils::thread::scope(|s| {
         s.spawn(|_| {
             if let Err(err) = forward_tcp_to_kcp(&mut tcp_read, &mut kcp_write, &should_stop) {
-                log::error!("error forwarding TCP to KCP: {}", err);
+                let tcp_addr = tcp_read
+                    .peer_addr()
+                    .map(|addr| addr.to_string())
+                    .unwrap_or_else(|_| String::from("ERROR"));
+                log::error!(
+                    "error forwarding {} (TCP) to {} (KCP): {}",
+                    tcp_addr,
+                    kcp_write,
+                    err
+                );
             }
+            kcp_write.send(b"");
+            kcp_write.flush();
             should_stop.store(true, Ordering::SeqCst);
         });
         s.spawn(|_| {
             if let Err(err) = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop) {
-                log::error!("error forwarding KCP to TCP: {}", err);
+                let tcp_addr = tcp_write
+                    .peer_addr()
+                    .map(|addr| addr.to_string())
+                    .unwrap_or_else(|_| String::from("ERROR"));
+                log::error!(
+                    "error forwarding {} (KCP) to {} (TCP): {}",
+                    kcp_read,
+                    tcp_addr,
+                    err
+                );
             }
             should_stop.store(true, Ordering::SeqCst);
         });
@@ -126,7 +146,6 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         if !should_stop.load(Ordering::SeqCst) {
             log::debug!("TCP side closes the connection: {}", from.peer_addr()?);
         }
-        to.send(b"");
         Ok(())
     }
 

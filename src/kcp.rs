@@ -226,12 +226,6 @@ impl KcpConnection {
     }
 }
 
-impl Drop for KcpConnection {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
 impl fmt::Display for KcpConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         {

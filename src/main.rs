@@ -8,8 +8,8 @@ mod socks5;
 
 use crate::config::get_config;
 use log::LevelFilter;
-use std::env;
 use parking_lot::deadlock;
+use std::env;
 use std::thread;
 
 fn main() {
@@ -28,28 +28,26 @@ fn main() {
     kcp::init_kcp_scheduler();
     icmp::init_send_recv_loop();
 
-    thread::spawn(move || {
-        loop {
-            thread::sleep(std::time::Duration::from_secs(2));
-            let deadlocks = deadlock::check_deadlock();
-            if deadlocks.is_empty() {
-                continue;
-            }
+    thread::spawn(move || loop {
+        thread::sleep(std::time::Duration::from_secs(2));
+        let deadlocks = deadlock::check_deadlock();
+        if deadlocks.is_empty() {
+            continue;
+        }
 
-            log::info!("{} deadlocks detected", deadlocks.len());
-            for (i, threads) in deadlocks.iter().enumerate() {
-                log::info!("Deadlock #{}", i);
-                for t in threads {
-                    log::info!("Thread Id {:#?}", t.thread_id());
-                    log::info!("{:#?}", t.backtrace());
-                }
+        log::info!("{} deadlocks detected", deadlocks.len());
+        for (i, threads) in deadlocks.iter().enumerate() {
+            log::info!("Deadlock #{}", i);
+            for t in threads {
+                log::info!("Thread Id {:#?}", t.thread_id());
+                log::info!("{:#?}", t.backtrace());
             }
         }
     });
 
     if get_config().remote.is_none() {
         server::run_server();
-        // server::test_file_upload();
+    // server::test_file_upload();
     } else {
         client::run_client();
         // client::test_file_download();

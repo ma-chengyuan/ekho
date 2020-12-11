@@ -268,8 +268,8 @@ impl TryFrom<&[u8]> for Socks5UdpEncapsulation {
         let frag = buf[2];
         let addr_len = match buf[3] {
             ATYP_IPV4 => 5,
-            ATYP_DOMAIN_NAME => buf[4] as usize + 2,
             ATYP_IPV6 => 17,
+            ATYP_DOMAIN_NAME => buf[4] as usize + 2,
             _ => return Err(Socks5ParseError::InvalidLength),
         };
         let dst = Socks5SocketAddr::try_from(&buf[3..3 + addr_len])?;
