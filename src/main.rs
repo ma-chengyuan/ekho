@@ -48,10 +48,10 @@ fn main() {
     });
 
     if get_config().remote.is_none() {
-        // server::run_server();
-        server::test_file_upload();
+        server::run_server();
+        // server::test_file_upload();
     } else {
-        // client::run_client();
-        client::test_file_download();
+        client::run_client();
+        // client::test_file_download();
     }
 }

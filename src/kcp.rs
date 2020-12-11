@@ -108,8 +108,6 @@ pub fn init_kcp_scheduler() {
                                 Reverse(next_update),
                             );
                             while let Some(mut packet) = kcp.output() {
-                                log::debug!("sending packet:");
-                                KcpControlBlock::dissect_packet_from_raw(&packet);
                                 if CIPHER.encrypt_in_place(&NONCE, b"", &mut packet).is_ok() {
                                     crate::icmp::send_packet(*endpoint, packet);
                                 } else {
@@ -257,8 +255,6 @@ pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
         }
         if let Some(state) = CONNECTION_STATE.get(&key).and_then(|state| state.upgrade()) {
             {
-                log::debug!("received packet: ");
-                KcpControlBlock::dissect_packet_from_raw(&packet);
                 let mut kcp = state.control.lock();
                 if let Err(e) = kcp.input(&packet) {
                     log::error!("error processing KCP packet: {}", e);
