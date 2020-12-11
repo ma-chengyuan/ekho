@@ -749,9 +749,7 @@ impl KcpControlBlock {
         // and pacing_gain. However, the effects of the two parameters are hard to distinguish when
         // packets are flushed. Thus, it may be better to merge the two parameters into one here.
         let limit = if self.bbr_enabled {
-            // OPTIMIZE: empirical tests have found the current limit to be a bit conservative.
-            //  one solution might be to multiply the current limit with a small, configurable gain.
-            match self.bbr_state {
+            let limit = match self.bbr_state {
                 BBRState::Startup => self.bdp() * 2955 / 1024, /* 2 / ln2 */
                 // ln2 / 2 is the value of pacing_gain. Given the current state machine logic in
                 // update_bbr_state, this value stops KCP from sending anything.
@@ -761,7 +759,11 @@ impl KcpControlBlock {
                 //  phase. Considering that the current limit does not significantly impose a
                 //  penalty to throughput, I'll keep the current limit.
                 BBRState::ProbeRTT(_, _) => 4 * self.mtu as usize,
-            }
+            };
+            // Empirical tests have found the current limit to be a bit conservative. One solution
+            // might be to multiply the current limit with a small, configurable gain.
+            // Here the gain is 1.1
+            limit * 1126 / 1024
         } else {
             usize::max_value()
         };
