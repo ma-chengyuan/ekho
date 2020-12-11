@@ -37,8 +37,7 @@ use rand::Rng;
 use std::cmp::Reverse;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,29 +47,29 @@ struct KcpConnectionState {
     endpoint: RwLock<IcmpEndpoint>,
 }
 
+#[derive(Clone)]
 pub struct KcpConnection {
-    count: Arc<AtomicUsize>,
     state: Arc<KcpConnectionState>,
 }
 
-struct KcpSchedulerItem(Arc<KcpConnectionState>);
+struct KcpSchedulerItem(Weak<KcpConnectionState>);
 
 impl Eq for KcpSchedulerItem {}
 
 impl PartialEq for KcpSchedulerItem {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Weak::ptr_eq(&self.0, &other.0)
     }
 }
 
 impl Hash for KcpSchedulerItem {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).hash(state);
+        Weak::as_ptr(&self.0).hash(state);
     }
 }
 
 lazy_static! {
-    static ref CONNECTION_STATE: DashMap<(IcmpEndpoint, u32), Arc<KcpConnectionState>> =
+    static ref CONNECTION_STATE: DashMap<(IcmpEndpoint, u32), Weak<KcpConnectionState>> =
         DashMap::new();
     static ref UPDATE_SCHEDULE: Mutex<PriorityQueue<KcpSchedulerItem, Reverse<u32>>> =
         Mutex::new(PriorityQueue::new());
@@ -82,7 +81,7 @@ lazy_static! {
 
 fn schedule_immediate_update(target: Arc<KcpConnectionState>) {
     let mut guard = UPDATE_SCHEDULE.lock();
-    guard.push_increase(KcpSchedulerItem(target), Reverse(0));
+    guard.push_increase(KcpSchedulerItem(Arc::downgrade(&target)), Reverse(0));
 }
 
 pub fn init_kcp_scheduler() {
@@ -98,21 +97,26 @@ pub fn init_kcp_scheduler() {
                     .unwrap_or(false)
                 {
                     let (KcpSchedulerItem(state), _) = guard.pop().unwrap();
-                    let mut kcp = state.control.lock();
-                    kcp.update(now);
-                    {
-                        let endpoint = state.endpoint.read();
-                        let next_update = std::cmp::max(kcp.check(now), now + 1);
-                        guard.push(KcpSchedulerItem(state.clone()), Reverse(next_update));
-                        while let Some(mut packet) = kcp.output() {
-                            if CIPHER.encrypt_in_place(&NONCE, b"", &mut packet).is_ok() {
-                                crate::icmp::send_packet(*endpoint, packet);
-                            } else {
-                                log::error!("error encrypting KCP/ICMP packet");
+                    if let Some(state) = state.upgrade() {
+                        let mut kcp = state.control.lock();
+                        kcp.update(now);
+                        {
+                            let endpoint = state.endpoint.read();
+                            let next_update = std::cmp::max(kcp.check(now), now + 1);
+                            guard.push(
+                                KcpSchedulerItem(Arc::downgrade(&state)),
+                                Reverse(next_update),
+                            );
+                            while let Some(mut packet) = kcp.output() {
+                                if CIPHER.encrypt_in_place(&NONCE, b"", &mut packet).is_ok() {
+                                    crate::icmp::send_packet(*endpoint, packet);
+                                } else {
+                                    log::error!("error encrypting KCP/ICMP packet");
+                                }
                             }
                         }
+                        state.condvar.notify_all();
                     }
-                    state.condvar.notify_all();
                 }
             }
             // This does NOT mean sleeping for 1 ms, since most OSes have very poor sleep accuracy
@@ -147,9 +151,8 @@ impl KcpConnection {
             kcp.set_bdp_gain(config.bdp_gain);
             kcp.set_rto_min(config.rto_min);
         }
-        CONNECTION_STATE.insert((endpoint, conv), state.clone());
+        CONNECTION_STATE.insert((endpoint, conv), Arc::downgrade(&state));
         Some(KcpConnection {
-            count: Arc::new(AtomicUsize::new(1)),
             state,
         })
     }
@@ -214,30 +217,20 @@ impl KcpConnection {
     }
 }
 
-impl Clone for KcpConnection {
-    fn clone(&self) -> Self {
-        let cnt = self.count.load(Ordering::SeqCst);
-        self.count.store(cnt + 1, Ordering::SeqCst);
-        KcpConnection {
-            count: self.count.clone(),
-            state: self.state.clone(),
-        }
-    }
-}
-
-impl Drop for KcpConnection {
+impl Drop for KcpConnectionState {
     fn drop(&mut self) {
-        let cnt = self.count.load(Ordering::SeqCst);
-        self.count.store(cnt - 1, Ordering::SeqCst);
-        if cnt == 1 {
-            self.flush();
-            let conv = self.state.control.lock().conv();
-            CONNECTION_STATE.remove(&(*self.state.endpoint.read(), conv));
-            log::debug!(
-                "KCP connection closed, {} remaining",
-                CONNECTION_STATE.len()
-            );
+        {
+            let mut kcp = self.control.lock();
+            while !kcp.all_flushed() {
+                self.condvar.wait(&mut kcp);
+            }
         }
+        let conv = self.control.lock().conv();
+        CONNECTION_STATE.remove(&(*self.endpoint.read(), conv));
+        log::debug!(
+            "KCP connection closed, {} remaining",
+            CONNECTION_STATE.len()
+        );
     }
 }
 
@@ -264,14 +257,16 @@ pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
             }
         }
         if let Some(state) = CONNECTION_STATE.get(&(from, conv)) {
-            {
-                let mut kcp = state.control.lock();
-                if let Err(e) = kcp.input(&packet) {
-                    log::error!("error processing KCP packet: {}", e);
+            if let Some(state) = state.upgrade() {
+                {
+                    let mut kcp = state.control.lock();
+                    if let Err(e) = kcp.input(&packet) {
+                        log::error!("error processing KCP packet: {}", e);
+                    }
+                    state.condvar.notify_all();
                 }
-                state.condvar.notify_all();
+                schedule_immediate_update(state.clone());
             }
-            schedule_immediate_update(state.clone());
         }
     } else {
         // TODO: Maybe simulate real ping behavior?
