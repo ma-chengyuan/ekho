@@ -1032,4 +1032,26 @@ impl KcpControlBlock {
         }
         true
     }
+
+    pub fn dissect_packet_from_raw(mut buf: &[u8]) {
+        while buf.len() >= KCP_OVERHEAD as usize {
+            let _conv = buf.get_u32_le();
+            let cmd = buf.get_u8();
+            let frg = buf.get_u8();
+            let wnd = buf.get_u16_le();
+            let ts = buf.get_u32_le();
+            let sn = buf.get_u32_le();
+            let una = buf.get_u32_le();
+            let len = buf.get_u32_le() as usize;
+            let common = format!("frg {} wnd {} ts {} sn {} una {} len {}", frg, wnd, ts, sn, una, len);
+            match cmd {
+                KCP_CMD_PUSH => log::debug!("  PUSH {}", common),
+                KCP_CMD_ACK => log::debug!("  ACK {}", common),
+                KCP_CMD_WND_ASK => log::debug!("  WASK {}", common),
+                KCP_CMD_WND_TELL => log::debug!("  WTELL {}", common),
+                _ => {}
+            }
+            buf = &buf[len..];
+        }
+    }
 }

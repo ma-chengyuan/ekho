@@ -235,6 +235,8 @@ pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
             && KcpControlBlock::first_push_packet(&packet)
         {
             let new_connection = KcpConnection::connect_with_conv(from, conv).unwrap();
+            log::debug!("new connection {}", new_connection);
+            KcpControlBlock::dissect_packet_from_raw(&packet);
             if let Err(e) = INCOMING.0.send(new_connection) {
                 log::error!("error adding incoming connection to the queue: {}", e);
             }
