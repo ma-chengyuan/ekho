@@ -127,6 +127,17 @@ pub fn init_kcp_scheduler() {
     });
 }
 
+impl Drop for KcpConnectionState {
+    fn drop(&mut self) {
+        let conv = self.control.lock().conv();
+        CONNECTION_STATE.remove(&(*self.endpoint.read(), conv));
+        log::debug!(
+            "KCP connection closed, {} remaining",
+            CONNECTION_STATE.len()
+        );
+    }
+}
+
 impl KcpConnection {
     pub fn incoming() -> Self {
         INCOMING.1.recv().unwrap()
@@ -217,21 +228,9 @@ impl KcpConnection {
     }
 }
 
-impl Drop for KcpConnectionState {
+impl Drop for KcpConnection {
     fn drop(&mut self) {
-        log::debug!("KcpConnectionState::drop()");
-        {
-            let mut kcp = self.control.lock();
-            while !kcp.all_flushed() {
-                self.condvar.wait(&mut kcp);
-            }
-        }
-        let conv = self.control.lock().conv();
-        CONNECTION_STATE.remove(&(*self.endpoint.read(), conv));
-        log::debug!(
-            "KCP connection closed, {} remaining",
-            CONNECTION_STATE.len()
-        );
+        self.flush();
     }
 }
 
