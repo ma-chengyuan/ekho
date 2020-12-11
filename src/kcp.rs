@@ -149,7 +149,7 @@ impl KcpConnection {
         }
         CONNECTION_STATE.insert((endpoint, conv), state.clone());
         Some(KcpConnection {
-            count: Arc::new(AtomicUsize::new(0)),
+            count: Arc::new(AtomicUsize::new(1)),
             state,
         })
     }
