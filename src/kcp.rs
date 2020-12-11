@@ -152,9 +152,7 @@ impl KcpConnection {
             kcp.set_rto_min(config.rto_min);
         }
         CONNECTION_STATE.insert((endpoint, conv), Arc::downgrade(&state));
-        Some(KcpConnection {
-            state,
-        })
+        Some(KcpConnection { state })
     }
 
     pub fn connect(endpoint: IcmpEndpoint) -> Self {
@@ -219,6 +217,7 @@ impl KcpConnection {
 
 impl Drop for KcpConnectionState {
     fn drop(&mut self) {
+        log::debug!("KcpConnectionState::drop()");
         {
             let mut kcp = self.control.lock();
             while !kcp.all_flushed() {
@@ -248,25 +247,22 @@ impl fmt::Display for KcpConnection {
 pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
     if let Ok(packet) = CIPHER.decrypt(&NONCE, packet) {
         let conv = KcpControlBlock::conv_from_raw(&packet);
-        if !CONNECTION_STATE.contains_key(&(from, conv))
-            && KcpControlBlock::first_push_packet(&packet)
-        {
+        let key = &(from, conv);
+        if !CONNECTION_STATE.contains_key(key) && KcpControlBlock::first_push_packet(&packet) {
             let new_connection = KcpConnection::connect_with_conv(from, conv).unwrap();
             if let Err(e) = INCOMING.0.send(new_connection) {
                 log::error!("error adding incoming connection to the queue: {}", e);
             }
         }
-        if let Some(state) = CONNECTION_STATE.get(&(from, conv)) {
-            if let Some(state) = state.upgrade() {
-                {
-                    let mut kcp = state.control.lock();
-                    if let Err(e) = kcp.input(&packet) {
-                        log::error!("error processing KCP packet: {}", e);
-                    }
-                    state.condvar.notify_all();
+        if let Some(state) = CONNECTION_STATE.get(&key).and_then(|state| state.upgrade()) {
+            {
+                let mut kcp = state.control.lock();
+                if let Err(e) = kcp.input(&packet) {
+                    log::error!("error processing KCP packet: {}", e);
                 }
-                schedule_immediate_update(state.clone());
+                state.condvar.notify_all();
             }
+            schedule_immediate_update(state.clone());
         }
     } else {
         // TODO: Maybe simulate real ping behavior?
