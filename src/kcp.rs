@@ -202,6 +202,11 @@ impl KcpConnection {
             self.state.condvar.wait(&mut kcp);
         }
     }
+
+    pub fn mss(&self) -> usize {
+        let mut kcp = self.state.control.lock();
+        kcp.mss() as usize
+    }
 }
 
 impl Drop for KcpConnection {

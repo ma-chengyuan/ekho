@@ -76,24 +76,28 @@ pub fn connect_directly(_addr: &Socks5SocketAddr) -> bool {
     false
 }
 
-fn test_file_download() {
+pub fn test_file_download() {
     use std::fs::File;
-    let mut kcp = KcpConnection::connect(get_config().remote.unwrap());
-    kcp.send(b"");
-    let mut file = File::create("sample.mp4").unwrap();
-    loop {
-        let packet = kcp.recv();
-        if packet.is_empty() {
-            log::info!("recv complete");
-            break;
-        }
-        file.write_all(&packet).unwrap();
+    for _ in 0..2 {
+        thread::spawn(|| {
+            let mut kcp = KcpConnection::connect(get_config().remote.unwrap());
+            kcp.send(b"");
+            log::info!("request download from {}", kcp);
+            let mut file = File::create("sample").unwrap();
+            loop {
+                let packet = kcp.recv();
+                if packet.is_empty() {
+                    log::info!("recv complete");
+                    break;
+                }
+                file.write_all(&packet).unwrap();
+            }
+            log::info!("download complete from {}", kcp);
+        });
     }
 }
 
 pub fn run_client() {
-    // test_file_download();
-    // return;
     let listener = TcpListener::bind("127.0.0.1:23333").unwrap();
     for stream in listener.incoming() {
         thread::spawn(|| {

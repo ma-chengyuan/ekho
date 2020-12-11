@@ -34,6 +34,26 @@ fn handle_request(mut kcp: KcpConnection) -> Result<()> {
     Ok(())
 }
 
+pub fn test_file_upload() {
+    use std::fs::File;
+    loop {
+        let mut kcp = KcpConnection::incoming();
+        thread::spawn(move || {
+            log::info!("start file transmission to {}", kcp);
+            let mut file = File::open("sample").unwrap();
+            let mut buf = vec![0; kcp.mss()];
+            loop {
+                let len = file.read(&mut buf).unwrap();
+                kcp.send(&buf[..len]);
+                if len == 0 {
+                    log::info!("completed transmission to {}", kcp);
+                    break;
+                }
+            }
+        });
+    }
+}
+
 pub fn run_server() {
     loop {
         let kcp = KcpConnection::incoming();

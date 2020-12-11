@@ -111,7 +111,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         to: &mut KcpConnection,
         should_stop: &AtomicBool,
     ) -> Result<()> {
-        let mut buf = [0; 1024];
+        let mut buf = vec![0; to.mss()];
         if let Ok(None) = from.read_timeout() {
             from.set_read_timeout(Some(TIMEOUT))?;
         }
