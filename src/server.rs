@@ -58,21 +58,6 @@ pub fn run_server() {
     loop {
         let kcp = KcpConnection::incoming();
         thread::spawn(|| {
-            /*
-            use std::fs::File;
-            log::info!("start transmission...");
-            let mut file = File::open("sample.mp4").unwrap();
-            let mut buf = [0u8; 480];
-            loop {
-                let len = file.read(&mut buf).unwrap();
-                kcp.send(&buf[..len]);
-                if len == 0 {
-                    log::info!("transmission completed!");
-                    break;
-                }
-            }
-            return;
-             */
             if let Err(err) = handle_request(kcp) {
                 log::error!("{}", err);
             }

@@ -78,23 +78,27 @@ pub fn connect_directly(_addr: &Socks5SocketAddr) -> bool {
 
 pub fn test_file_download() {
     use std::fs::File;
-    for _ in 0..2 {
-        thread::spawn(|| {
-            let mut kcp = KcpConnection::connect(get_config().remote.unwrap());
-            kcp.send(b"");
-            log::info!("request download from {}", kcp);
-            let mut file = File::create("sample").unwrap();
-            loop {
-                let packet = kcp.recv();
-                if packet.is_empty() {
-                    log::info!("recv complete");
-                    break;
+    crossbeam_utils::thread::scope(|s| {
+        for i in 0..3 {
+            s.spawn(move |_| {
+                let mut kcp = KcpConnection::connect(get_config().remote.unwrap());
+                kcp.send(b"");
+                log::info!("request download from {}", kcp);
+                let mut file = File::create(format!("sample{}", i)).unwrap();
+                loop {
+                    let packet = kcp.recv();
+                    if packet.is_empty() {
+                        log::info!("recv complete");
+                        break;
+                    }
+                    file.write_all(&packet).unwrap();
                 }
-                file.write_all(&packet).unwrap();
-            }
-            log::info!("download complete from {}", kcp);
-        });
-    }
+                log::info!("download complete from {}", kcp);
+            });
+            thread::sleep(std::time::Duration::from_secs(3));
+        }
+    })
+    .unwrap();
 }
 
 pub fn run_client() {

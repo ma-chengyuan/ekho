@@ -1014,4 +1014,17 @@ impl KcpControlBlock {
     pub fn conv_from_raw(buf: &[u8]) -> u32 {
         u32::from_le_bytes(buf[..4].try_into().unwrap())
     }
+
+    pub fn first_push_packet(mut buf: &[u8]) -> bool {
+        if buf.len() <= KCP_OVERHEAD as usize {
+            return false;
+        }
+        let _conv = buf.get_u32_le();
+        let cmd = buf.get_u8();
+        let _frg = buf.get_u8();
+        let _wnd = buf.get_u16_le();
+        let _ts = buf.get_u32_le();
+        let sn = buf.get_u32_le();
+        cmd == KCP_CMD_PUSH && sn == 0
+    }
 }

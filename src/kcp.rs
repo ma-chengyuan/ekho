@@ -231,7 +231,9 @@ impl fmt::Display for KcpConnection {
 pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
     if let Ok(packet) = CIPHER.decrypt(&NONCE, packet) {
         let conv = KcpControlBlock::conv_from_raw(&packet);
-        if !CONNECTION_STATE.contains_key(&(from, conv)) {
+        if !CONNECTION_STATE.contains_key(&(from, conv))
+            && KcpControlBlock::first_push_packet(&packet)
+        {
             let new_connection = KcpConnection::connect_with_conv(from, conv).unwrap();
             if let Err(e) = INCOMING.0.send(new_connection) {
                 log::error!("error adding incoming connection to the queue: {}", e);
