@@ -142,7 +142,8 @@ impl KcpConnection {
             kcp.set_nodelay(config.nodelay);
             kcp.set_interval(config.interval);
             kcp.set_fast_resend(config.resend);
-            kcp.set_congestion_control(config.congestion_control);
+            kcp.set_bbr(config.bbr);
+            kcp.set_bdp_gain(config.bdp_gain);
             kcp.set_rto_min(config.rto_min);
         }
         CONNECTION_STATE.insert((endpoint, conv), state.clone());

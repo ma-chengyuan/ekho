@@ -21,8 +21,10 @@ pub struct KcpConfig {
     pub nodelay: bool,
     pub interval: u32,
     pub resend: u32,
-    pub congestion_control: bool,
+    pub bbr: bool,
     pub rto_min: u32,
+    #[serde(default = "default_bdp_gain")]
+    pub bdp_gain: f64,
     #[serde(default = "default_kcp_send_window_size")]
     pub send_window_size: u16,
     #[serde(default = "default_kcp_recv_window_size")]
@@ -37,6 +39,10 @@ const fn default_kcp_send_window_size() -> u16 {
 
 const fn default_kcp_recv_window_size() -> u16 {
     2048
+}
+
+const fn default_bdp_gain() -> f64 {
+    1.25
 }
 
 fn deserialize_key<'de, D: Deserializer<'de>>(d: D) -> Result<Key, D::Error> {

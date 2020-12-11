@@ -106,6 +106,8 @@ const KCP_BTL_BW_WINDOW: u32 = 10;
 const KCP_PROBE_RTT_TIME: u32 = 200;
 /// Gain cycles (x4) used in ProbeBW state of the BBR control algorithm.
 const KCP_GAIN_CYCLE: [usize; 8] = [5, 3, 4, 4, 4, 4, 4, 4];
+/// KCP BDP gain denominator
+const KCP_BDP_GAIN_DEN: usize = 1024;
 
 /// KCP segment representing a KCP packet.
 #[derive(Default)]
@@ -223,6 +225,7 @@ pub struct KcpControlBlock {
     // Experimental BBR fields
     /// Is BBR enabled?
     bbr_enabled: bool,
+    bdp_gain: usize,
     /// Time of receiving the last ACK packet.
     ts_last_ack: u32,
     /// Bytes confirmed to have been delivered.
@@ -298,6 +301,7 @@ impl KcpControlBlock {
 
             // BBR
             bbr_enabled: true,
+            bdp_gain: 1024,
             delivered: 0,
             ts_last_ack: 0,
             inflight: 0,
@@ -755,15 +759,11 @@ impl KcpControlBlock {
                 // update_bbr_state, this value stops KCP from sending anything.
                 BBRState::Drain => self.bdp() * 355 / 1024, /* ln2 / 2 */
                 BBRState::ProbeBW(_, phase) => self.bdp() * KCP_GAIN_CYCLE[phase] / 4,
-                // OPTIMIZE: according to BBRv2, half BDP seems to be a better limit in ProbeRTT
-                //  phase. Considering that the current limit does not significantly impose a
-                //  penalty to throughput, I'll keep the current limit.
-                BBRState::ProbeRTT(_, _) => 4 * self.mtu as usize,
+                BBRState::ProbeRTT(_, _) => self.bdp() / 2,
             };
             // Empirical tests have found the current limit to be a bit conservative. One solution
             // might be to multiply the current limit with a small, configurable gain.
-            // Here the gain is 1.25
-            limit * 5 / 4
+            limit * self.bdp_gain / KCP_BDP_GAIN_DEN
         } else {
             usize::max_value()
         };
@@ -985,12 +985,20 @@ impl KcpControlBlock {
         self.fast_resend_threshold
     }
 
-    pub fn set_congestion_control(&mut self, enabled: bool) {
+    pub fn set_bbr(&mut self, enabled: bool) {
         self.bbr_enabled = enabled
     }
 
-    pub fn congestion_control(&self) -> bool {
+    pub fn bbr(&self) -> bool {
         self.bbr_enabled
+    }
+
+    pub fn set_bdp_gain(&mut self, bdp_gain: f64) {
+        self.bdp_gain = (KCP_BDP_GAIN_DEN as f64 * bdp_gain).round() as usize
+    }
+
+    pub fn bdp_gain(&self) -> f64 {
+        self.bdp_gain as f64 / KCP_BDP_GAIN_DEN as f64
     }
 
     pub fn set_rto_min(&mut self, rto_min: u32) {
