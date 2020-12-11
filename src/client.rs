@@ -95,7 +95,7 @@ pub fn test_file_download() {
     use std::fs::File;
     use std::time::Duration;
     crossbeam_utils::thread::scope(|s| {
-        for i in 0..2 {
+        for i in 0..1 {
             s.spawn(move |_| {
                 let mut kcp = KcpConnection::connect(get_config().remote.unwrap());
                 kcp.send(b"");
