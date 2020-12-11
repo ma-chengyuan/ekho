@@ -93,13 +93,13 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
             if let Err(err) = forward_tcp_to_kcp(&mut tcp_read, &mut kcp_write, &should_stop) {
                 log::error!("error forwarding TCP to KCP: {}", err);
             }
-            should_stop.store(true, Ordering::Relaxed);
+            should_stop.store(true, Ordering::SeqCst);
         });
         s.spawn(|_| {
             if let Err(err) = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop) {
                 log::error!("error forwarding KCP to TCP: {}", err);
             }
-            should_stop.store(true, Ordering::Relaxed);
+            should_stop.store(true, Ordering::SeqCst);
         });
     })
     .unwrap();
@@ -115,7 +115,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         if let Ok(None) = from.read_timeout() {
             from.set_read_timeout(Some(TIMEOUT))?;
         }
-        while !should_stop.load(Ordering::Relaxed) {
+        while !should_stop.load(Ordering::SeqCst) {
             let result = from.read(&mut buf);
             match result {
                 Ok(0) => break,
@@ -123,9 +123,10 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 Err(err) => handle_io_error(err)?,
             }
         }
-        log::debug!("TCP side closes the connection: {}", from.peer_addr()?);
+        if !should_stop.load(Ordering::SeqCst) {
+            log::debug!("TCP side closes the connection: {}", from.peer_addr()?);
+        }
         to.send(b"");
-        log::debug!("KCP side signal sent: {}", from.peer_addr()?);
         Ok(())
     }
 
@@ -134,7 +135,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         to: &mut TcpStream,
         should_stop: &AtomicBool,
     ) -> Result<()> {
-        while !should_stop.load(Ordering::Relaxed) {
+        while !should_stop.load(Ordering::SeqCst) {
             if let Some(buf) = from.recv_with_timeout(TIMEOUT) {
                 if buf.is_empty() {
                     break;
@@ -142,7 +143,9 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 to.write_all(&buf)?;
             }
         }
-        log::debug!("KCP side closes the connection: {}", from);
+        if !should_stop.load(Ordering::SeqCst) {
+            log::debug!("KCP side closes the connection: {}", from);
+        }
         Ok(())
     }
 }

@@ -130,7 +130,7 @@ impl Drop for KcpConnectionState {
         let conv = self.control.lock().conv();
         CONNECTION_STATE.remove(&(*self.endpoint.read(), conv));
         log::debug!(
-            "KCP connection closed, {} remaining",
+            "KCP connection dropped, {} remaining",
             CONNECTION_STATE.len()
         );
     }
