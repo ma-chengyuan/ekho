@@ -111,21 +111,13 @@ const KCP_BDP_GAIN_DEN: usize = 1024;
 
 /// KCP segment representing a KCP packet.
 #[derive(Default)]
+#[rustfmt::skip]
 struct KcpSegment {
-    /// Conversation ID.
-    conv: u32,
-    /// KCP command.
-    cmd: u8,
-    /// Packet fragmentation.
-    frg: u8,
-    /// Window size.
-    wnd: u16,
-    /// Timestamp when sent.
-    ts: u32,
-    /// Packet sequence number.
-    sn: u32,
-    /// UNA when sent.
-    una: u32,
+    // Header
+    #[doc = "Conversation ID."]     conv: u32,  #[doc = "KCP command."]         cmd: u8,
+    #[doc = "Fragmentation."]       frg: u8,    #[doc = "Remote window size."]  wnd: u16,
+    #[doc = "Timestamp when sent."] ts: u32,    #[doc = "Sequence number."]     sn: u32,
+    #[doc = "UNA when sent."]       una: u32,
     /// Timestamp for next retransmission.
     ts_resend: u32,
     /// Retransmission timeout.
@@ -136,8 +128,6 @@ struct KcpSegment {
     xmits: u32,
     /// The payload.
     payload: Vec<u8>,
-
-    // BBR
     /// Delivered bytes when sent.
     delivered: usize,
     /// Time of receiving the last ACK packet when the packet is sent.
@@ -222,9 +212,9 @@ pub struct KcpControlBlock {
     /// Buffer used to merge small packets into a batch (thus making better use of bandwidth).
     buffer: Vec<u8>,
 
-    // Experimental BBR fields
-    /// Is BBR enabled?
+    /// Whether the BBR congestion control algorithm is enabled
     bbr_enabled: bool,
+    /// Controls how aggressively BBR controls the send window
     bdp_gain: usize,
     /// Time of receiving the last ACK packet.
     ts_last_ack: u32,
@@ -815,7 +805,7 @@ impl KcpControlBlock {
                 seg.rto = if self.nodelay {
                     max(seg.rto, self.rto)
                 } else {
-                    // Increase RTO by 1.5x, better than 2.0 in TCP
+                    // Increase RTO by 1.5x, better than 2x in TCP
                     seg.rto + seg.rto / 2
                 };
                 seg.ts_resend = self.current + seg.rto;
@@ -1012,17 +1002,23 @@ impl KcpControlBlock {
         self.rcv_wnd = max(recv, KCP_MAX_FRAGMENTS);
     }
 
+    pub fn dead_link(&self) -> bool {
+        self.dead_link
+    }
+
     pub fn conv(&self) -> u32 {
         self.conv
     }
 
-    /// Gets the conversation id from a raw packet.
+    /// Gets the conversation id from a raw buffer.
     ///
-    /// Panics if `buf` as a length less than 4.
+    /// Panics if `buf` has a length less than 4.
     pub fn conv_from_raw(buf: &[u8]) -> u32 {
         u32::from_le_bytes(buf[..4].try_into().unwrap())
     }
 
+    /// Check if the given raw buffer `buf` contains the first PUSH packet, which marks the start
+    /// of a new connection.
     pub fn first_push_packet(mut buf: &[u8]) -> bool {
         while buf.len() >= KCP_OVERHEAD as usize {
             let _conv = buf.get_u32_le();
@@ -1041,7 +1037,8 @@ impl KcpControlBlock {
         true
     }
 
-    pub fn dissect_packet_from_raw(mut buf: &[u8]) {
+    /// Print the headers of the packets in the given raw buffer `buf` using `log::debug!(...)`
+    pub fn dissect_headers_from_raw(mut buf: &[u8]) {
         while buf.len() >= KCP_OVERHEAD as usize {
             let _conv = buf.get_u32_le();
             let cmd = buf.get_u8();
@@ -1051,17 +1048,18 @@ impl KcpControlBlock {
             let sn = buf.get_u32_le();
             let una = buf.get_u32_le();
             let len = buf.get_u32_le() as usize;
-            let common = format!(
-                "frg {} wnd {} ts {} sn {} una {} len {}",
+            #[rustfmt::skip]
+            log::debug!(
+                "{}\tfrg\t{}\twnd\t{}\tts\t{}\tsn\t{}\tuna\t{}\tlen\t{}",
+                match cmd {
+                    KCP_CMD_PUSH => "PUSH ",
+                    KCP_CMD_ACK => "ACK  ",
+                    KCP_CMD_WND_ASK => "WASK ",
+                    KCP_CMD_WND_TELL => "WTELL",
+                    _ => "ERROR",
+                },
                 frg, wnd, ts, sn, una, len
             );
-            match cmd {
-                KCP_CMD_PUSH => log::debug!("  PUSH {}", common),
-                KCP_CMD_ACK => log::debug!("  ACK {}", common),
-                KCP_CMD_WND_ASK => log::debug!("  WASK {}", common),
-                KCP_CMD_WND_TELL => log::debug!("  WTELL {}", common),
-                _ => {}
-            }
             buf = &buf[len..];
         }
     }

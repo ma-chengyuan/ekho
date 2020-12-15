@@ -119,7 +119,7 @@ pub fn test_file_download() {
 }
 
 pub fn run_client() {
-    let listener = TcpListener::bind("127.0.0.1:23333").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:23336").unwrap();
     for stream in listener.incoming() {
         thread::spawn(|| {
             if let Err(err) = handle_socks(stream.unwrap()) {

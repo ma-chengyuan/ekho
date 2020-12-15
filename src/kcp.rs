@@ -179,7 +179,7 @@ impl KcpConnection {
         {
             let mut kcp = self.state.control.lock();
             let max_send = get_config().kcp.send_window_size as usize * 2;
-            while kcp.wait_send() > max_send {
+            while kcp.wait_send() > max_send && !kcp.dead_link() {
                 self.state.condvar.wait(&mut kcp);
             }
             kcp.send(data).unwrap();
@@ -215,7 +215,7 @@ impl KcpConnection {
 
     pub fn flush(&mut self) {
         let mut kcp = self.state.control.lock();
-        while !kcp.all_flushed() {
+        while !kcp.all_flushed() && !kcp.dead_link() {
             self.state.condvar.wait(&mut kcp);
         }
     }
