@@ -217,13 +217,6 @@ impl KcpConnection {
         }
     }
 
-    pub fn flush(&mut self) {
-        let mut kcp = self.state.control.lock();
-        while !kcp.all_flushed() && !kcp.dead_link() {
-            self.state.condvar.wait(&mut kcp);
-        }
-    }
-
     pub fn mss(&self) -> usize {
         let mut kcp = self.state.control.lock();
         kcp.mss() as usize
@@ -248,7 +241,6 @@ impl Drop for KcpConnection {
             // If we are actively closing the connection
             let mut kcp = self.state.control.lock();
             if !self.state.closing.load(Ordering::SeqCst) {
-                let mut kcp = self.state.control.lock();
                 // Also wait for the other side to send FIN
                 while !kcp.dead_link() {
                     match kcp.recv() {
