@@ -102,16 +102,19 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                     err
                 );
             }
-            if !should_stop.load(Ordering::SeqCst) {
+            let prev = should_stop.load(Ordering::SeqCst);
+            should_stop.store(true, Ordering::SeqCst);
+            if !prev {
                 kcp_write.send(b"");
                 log::debug!("stop signal sent to {}, awaiting ACK.", kcp_write);
                 kcp_write.flush();
                 log::debug!("stop ACKed by {}", kcp_write);
             }
-            should_stop.store(true, Ordering::SeqCst);
         });
         s.spawn(|_| {
-            if let Err(err) = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop) {
+            let result = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop);
+            should_stop.store(true, Ordering::SeqCst);
+            if let Err(err) = result {
                 let tcp_addr = tcp_write
                     .peer_addr()
                     .map(|addr| addr.to_string())
@@ -130,7 +133,6 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 kcp_read.flush();
                 log::debug!("stop ACKed by {}", kcp_read);
             }
-            should_stop.store(true, Ordering::SeqCst);
         });
     })
     .unwrap();
