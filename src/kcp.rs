@@ -37,6 +37,7 @@ use rand::Rng;
 use std::cmp::Reverse;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,6 +46,7 @@ struct KcpConnectionState {
     control: Mutex<KcpControlBlock>,
     condvar: Condvar,
     endpoint: RwLock<IcmpEndpoint>,
+    closing: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -125,17 +127,6 @@ pub fn init_kcp_scheduler() {
     });
 }
 
-impl Drop for KcpConnectionState {
-    fn drop(&mut self) {
-        let conv = self.control.lock().conv();
-        CONNECTION_STATE.remove(&(*self.endpoint.read(), conv));
-        log::debug!(
-            "KCP connection dropped {}, {} remaining",
-            self, CONNECTION_STATE.len()
-        );
-    }
-}
-
 impl KcpConnection {
     pub fn incoming() -> Self {
         INCOMING.1.recv().unwrap()
@@ -149,6 +140,7 @@ impl KcpConnection {
             control: Mutex::new(KcpControlBlock::new(conv)),
             condvar: Condvar::new(),
             endpoint: RwLock::new(endpoint),
+            closing: AtomicBool::new(false),
         });
         {
             let config = &get_config().kcp;
@@ -194,7 +186,11 @@ impl KcpConnection {
             self.state.condvar.wait(&mut kcp);
             result = kcp.recv();
         }
-        result.unwrap()
+        let ret = result.unwrap();
+        if ret.is_empty() {
+            self.state.closing.store(true, Ordering::SeqCst);
+        }
+        ret
     }
 
     pub fn recv_with_timeout(&mut self, timeout: Duration) -> Option<Vec<u8>> {
@@ -209,7 +205,13 @@ impl KcpConnection {
         }
         match result {
             Err(KcpError::NotAvailable) => None,
-            _ => Some(result.unwrap()),
+            _ => {
+                let ret = result.unwrap();
+                if ret.is_empty() {
+                    self.state.closing.store(true, Ordering::SeqCst);
+                }
+                Some(ret)
+            }
         }
     }
 
@@ -226,20 +228,37 @@ impl KcpConnection {
     }
 }
 
-impl fmt::Display for KcpConnectionState {
+impl fmt::Display for KcpConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        {
-            let endpoint = self.endpoint.read();
-            write!(f, "{}:{}", endpoint.ip, endpoint.id)?;
-        }
-        let conv = self.control.lock().conv();
+        let endpoint = self.state.endpoint.read();
+        write!(f, "{}:{}", endpoint.ip, endpoint.id)?;
+        let conv = self.state.control.lock().conv();
         write!(f, "@{}", conv)
     }
 }
 
-impl fmt::Display for KcpConnection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.state)
+impl Drop for KcpConnection {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.state) == 1 {
+            // Empty segment = FIN
+            self.send(b"");
+            // If we are actively closing the connection
+            if !self.state.closing.load(Ordering::SeqCst) {
+                let mut kcp = self.state.control.lock();
+                // Also wait for the other side to send FIN
+                while !kcp.dead_link() {
+                    match kcp.recv() {
+                        Ok(data) if data.is_empty() => break,
+                        _ => self.state.condvar.wait(&mut kcp),
+                    }
+                }
+            }
+            self.flush();
+            let conv = self.state.control.lock().conv();
+            CONNECTION_STATE.remove(&(*self.state.endpoint.read(), conv));
+            #[rustfmt::skip]
+            log::debug!("KCP connection dropped {}, {} remaining", self, CONNECTION_STATE.len());
+        }
     }
 }
 

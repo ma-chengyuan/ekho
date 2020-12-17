@@ -34,6 +34,7 @@ fn handle_request(mut kcp: KcpConnection) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn test_file_upload() {
     use std::fs::File;
     loop {

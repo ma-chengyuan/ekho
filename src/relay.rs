@@ -73,16 +73,8 @@ pub fn relay_tcp(a: TcpStream, b: TcpStream) -> Result<()> {
 }
 
 pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
-    log::info!(
-        "relaying traffic between {} (TCP) and {} (KCP)",
-        tcp.peer_addr()?,
-        kcp
-    );
-    let stop_message = format!(
-        "relay stopped between {} (TCP) and {} (KCP)",
-        tcp.peer_addr()?,
-        kcp
-    );
+    let tcp_addr = tcp.peer_addr()?;
+    log::info!("relaying traffic between {} and {}", tcp_addr, kcp);
     let mut tcp_read = tcp;
     let mut tcp_write = tcp_read.try_clone()?;
     let mut kcp_read = kcp;
@@ -91,52 +83,20 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
     crossbeam_utils::thread::scope(|s| {
         s.spawn(|_| {
             if let Err(err) = forward_tcp_to_kcp(&mut tcp_read, &mut kcp_write, &should_stop) {
-                let tcp_addr = tcp_read
-                    .peer_addr()
-                    .map(|addr| addr.to_string())
-                    .unwrap_or_else(|_| String::from("ERROR"));
-                log::error!(
-                    "error forwarding {} (TCP) to {} (KCP): {}",
-                    tcp_addr,
-                    kcp_write,
-                    err
-                );
+                #[rustfmt::skip]
+                log::error!("error forwarding from {} to {}: {}", tcp_addr, kcp_write, err);
             }
-            let prev = should_stop.load(Ordering::SeqCst);
             should_stop.store(true, Ordering::SeqCst);
-            if !prev {
-                kcp_write.send(b"");
-                log::debug!("stop signal sent to {}, awaiting ACK.", kcp_write);
-                kcp_write.flush();
-                log::debug!("stop ACKed by {}", kcp_write);
-            }
         });
         s.spawn(|_| {
-            let result = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop);
-            should_stop.store(true, Ordering::SeqCst);
-            if let Err(err) = result {
-                let tcp_addr = tcp_write
-                    .peer_addr()
-                    .map(|addr| addr.to_string())
-                    .unwrap_or_else(|_| String::from("ERROR"));
-                log::error!(
-                    "error forwarding {} (KCP) to {} (TCP): {}",
-                    kcp_read,
-                    tcp_addr,
-                    err
-                );
-                // If forward_kcp_to_tcp ends normally, then the KCP connection has been terminated
-                // from server-side. However, when an error occurs, we have to notify the server
-                // that the client-side connection is closed.
-                kcp_read.send(b"");
-                log::debug!("stop signal sent to {}, awaiting ACK.", kcp_read);
-                kcp_read.flush();
-                log::debug!("stop ACKed by {}", kcp_read);
+            if let Err(err) = forward_kcp_to_tcp(&mut kcp_read, &mut tcp_write, &should_stop) {
+                #[rustfmt::skip]
+                log::error!("error forwarding from {} to {}: {}", kcp_read, tcp_addr, err);
             }
+            should_stop.store(true, Ordering::SeqCst);
         });
     })
     .unwrap();
-    log::info!("{}", stop_message);
     return Ok(());
 
     fn forward_tcp_to_kcp(

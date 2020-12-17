@@ -62,7 +62,7 @@ fn handle_socks(mut local: TcpStream) -> Result<()> {
             }
         }
         Socks5Command::UdpAssociate => {
-            let udp = UdpSocket::bind("127.0.0.1:0")?;
+            let _udp = UdpSocket::bind("127.0.0.1:0")?;
             crossbeam_utils::thread::scope(|s| {
                 s.spawn(move |_| {
                     let mut buf = [0u8; 1024];
@@ -91,6 +91,7 @@ pub fn connect_directly(_addr: &Socks5SocketAddr) -> bool {
     false
 }
 
+#[allow(dead_code)]
 pub fn test_file_download() {
     use std::fs::File;
     use std::time::Duration;
