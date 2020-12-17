@@ -130,8 +130,8 @@ impl Drop for KcpConnectionState {
         let conv = self.control.lock().conv();
         CONNECTION_STATE.remove(&(*self.endpoint.read(), conv));
         log::debug!(
-            "KCP connection dropped, {} remaining",
-            CONNECTION_STATE.len()
+            "KCP connection dropped {}, {} remaining",
+            self, CONNECTION_STATE.len()
         );
     }
 }
@@ -226,14 +226,20 @@ impl KcpConnection {
     }
 }
 
-impl fmt::Display for KcpConnection {
+impl fmt::Display for KcpConnectionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         {
-            let endpoint = self.state.endpoint.read();
+            let endpoint = self.endpoint.read();
             write!(f, "{}:{}", endpoint.ip, endpoint.id)?;
         }
-        let conv = self.state.control.lock().conv();
+        let conv = self.control.lock().conv();
         write!(f, "@{}", conv)
+    }
+}
+
+impl fmt::Display for KcpConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.state)
     }
 }
 

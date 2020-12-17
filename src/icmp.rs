@@ -43,7 +43,7 @@ pub fn init_send_recv_loop() {
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
     .expect("error creating transport channel");
-    platform_specific::prepare_receiver(&rx);
+    platform_impl::prepare_receiver(&rx);
     thread::spawn(move || recv_loop(&mut rx));
     thread::spawn(move || send_loop(&mut tx, CHANNEL.1.clone()));
 }
@@ -53,7 +53,7 @@ fn recv_loop(rx: &mut TransportReceiver) {
     loop {
         let (packet, addr) = iter.next().expect("error receiving ICMP packet");
         if let IpAddr::V4(ipv4) = addr {
-            if platform_specific::filter_local_ip(ipv4) {
+            if platform_impl::filter_local_ip(ipv4) {
                 let payload = packet.payload();
                 if (packet.get_icmp_type() == IcmpTypes::EchoRequest
                     || packet.get_icmp_type() == IcmpTypes::EchoReply)
@@ -129,7 +129,7 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
 /// 1. Guesses the common network adapter of the system and acquires its IP to bind the socket.
 /// 2. Filters out outgoing packets by their source IP.
 #[cfg(windows)]
-mod platform_specific {
+mod platform_impl {
     use lazy_static::lazy_static;
     use parking_lot::RwLock;
     use pnet_transport::TransportReceiver;
@@ -274,7 +274,7 @@ mod platform_specific {
 }
 
 #[cfg(not(windows))]
-mod platform_specific {
+mod platform_impl {
     use pnet_transport::TransportReceiver;
     use std::net::Ipv4Addr;
 

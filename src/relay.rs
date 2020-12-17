@@ -104,7 +104,9 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
             }
             if !should_stop.load(Ordering::SeqCst) {
                 kcp_write.send(b"");
+                log::debug!("stop signal sent to {}, awaiting ACK.", kcp_write);
                 kcp_write.flush();
+                log::debug!("stop ACKed by {}", kcp_write);
             }
             should_stop.store(true, Ordering::SeqCst);
         });
@@ -124,7 +126,9 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 // from server-side. However, when an error occurs, we have to notify the server
                 // that the client-side connection is closed.
                 kcp_read.send(b"");
+                log::debug!("stop signal sent to {}, awaiting ACK.", kcp_read);
                 kcp_read.flush();
+                log::debug!("stop ACKed by {}", kcp_read);
             }
             should_stop.store(true, Ordering::SeqCst);
         });

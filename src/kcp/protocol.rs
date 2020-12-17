@@ -113,7 +113,7 @@ const KCP_BDP_GAIN_DEN: usize = 1024;
 #[derive(Default)]
 #[rustfmt::skip]
 struct KcpSegment {
-    // Header
+    // Header layout
     #[doc = "Conversation ID."]     conv: u32,  #[doc = "KCP command."]         cmd: u8,
     #[doc = "Fragmentation."]       frg: u8,    #[doc = "Remote window size."]  wnd: u16,
     #[doc = "Timestamp when sent."] ts: u32,    #[doc = "Sequence number."]     sn: u32,
