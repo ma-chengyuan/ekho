@@ -70,6 +70,8 @@ impl Hash for KcpSchedulerItem {
     }
 }
 
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 lazy_static! {
     static ref CONNECTION_STATE: DashMap<(IcmpEndpoint, u32), Weak<KcpConnectionState>> =
         DashMap::new();
@@ -240,23 +242,33 @@ impl fmt::Display for KcpConnection {
 impl Drop for KcpConnection {
     fn drop(&mut self) {
         if Arc::strong_count(&self.state) == 1 {
+            let timeout = Instant::now().checked_add(CLOSE_TIMEOUT).unwrap();
             // Empty segment = FIN
             self.send(b"");
             // If we are actively closing the connection
+            let mut kcp = self.state.control.lock();
             if !self.state.closing.load(Ordering::SeqCst) {
                 let mut kcp = self.state.control.lock();
                 // Also wait for the other side to send FIN
                 while !kcp.dead_link() {
                     match kcp.recv() {
                         Ok(data) if data.is_empty() => break,
-                        _ => self.state.condvar.wait(&mut kcp),
+                        _ => {
+                            if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
+                                break;
+                            }
+                        }
                     }
                 }
             }
-            self.flush();
+            while !kcp.all_flushed() && !kcp.dead_link() {
+                if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
+                    break;
+                }
+            }
             let conv = self.state.control.lock().conv();
             CONNECTION_STATE.remove(&(*self.state.endpoint.read(), conv));
-            CONNECTION_STATE.retain(|_, state| state.upgrade().is_some());
+            // CONNECTION_STATE.retain(|_, state| state.upgrade().is_some());
             #[rustfmt::skip]
             log::debug!("KCP connection dropped {}, {} remaining", self, CONNECTION_STATE.len());
         }
