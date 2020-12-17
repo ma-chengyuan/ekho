@@ -44,81 +44,75 @@ pub fn init_send_recv_loop() {
     )
     .expect("error creating transport channel");
     platform_specific::prepare_receiver(&rx);
-    thread::spawn(move || {
-        crossbeam_utils::thread::scope(|s| {
-            s.spawn(|_| recv_loop(&mut rx));
-            s.spawn(|_| send_loop(&mut tx, CHANNEL.1.clone()));
-        })
-        .unwrap();
-    });
+    thread::spawn(move || recv_loop(&mut rx));
+    thread::spawn(move || send_loop(&mut tx, CHANNEL.1.clone()));
 }
 
 fn recv_loop(rx: &mut TransportReceiver) {
     let mut iter = icmp_packet_iter(rx);
     loop {
-        match iter.next() {
-            Ok((packet, addr)) => {
-                if let IpAddr::V4(ipv4) = addr {
-                    if platform_specific::filter_local_ip(ipv4) {
-                        let payload = packet.payload();
-                        if (packet.get_icmp_type() == IcmpTypes::EchoRequest
-                            || packet.get_icmp_type() == IcmpTypes::EchoReply)
-                            && payload.len() >= 4
-                        {
-                            let endpoint = IcmpEndpoint {
-                                ip: ipv4,
-                                id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
-                            };
-                            crate::kcp::on_recv_packet(&payload[4..], endpoint);
-                        }
-                    }
+        let (packet, addr) = iter.next().expect("error receiving ICMP packet");
+        if let IpAddr::V4(ipv4) = addr {
+            if platform_specific::filter_local_ip(ipv4) {
+                let payload = packet.payload();
+                if (packet.get_icmp_type() == IcmpTypes::EchoRequest
+                    || packet.get_icmp_type() == IcmpTypes::EchoReply)
+                    && payload.len() >= 4
+                {
+                    let endpoint = IcmpEndpoint {
+                        ip: ipv4,
+                        id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
+                    };
+                    crate::kcp::on_recv_packet(&payload[4..], endpoint);
                 }
             }
-            Err(e) => panic!("error receiving ICMP packet: {}", e),
         }
     }
 }
 
 fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
-    const HEADER: usize = IcmpPacket::minimum_packet_size();
-    let mut buf = [0u8; 1500];
-    let mut resend_last_packet = false;
-    let mut packet_len = 0usize;
+    let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
+    let mut resend = false;
+    let mut len = 0usize;
     let mut seq: HashMap<IcmpEndpoint, u16> = HashMap::new();
     let code = match get_config().remote {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
     };
-    let mut last_endpoint = IcmpEndpoint {
+    let mut last_dst = IcmpEndpoint {
         ip: Ipv4Addr::UNSPECIFIED,
         id: 0,
     };
     loop {
-        let result = if resend_last_packet {
+        let result = if resend {
             tx.send_to(
-                IcmpPacket::new(&buf[..packet_len]).unwrap(),
-                IpAddr::from(last_endpoint.ip),
+                IcmpPacket::new(&buf[..len]).unwrap(),
+                IpAddr::from(last_dst.ip),
             )
         } else {
-            let (endpoint, block) = input.recv().expect("error receiving data");
-            packet_len = HEADER + 4 + block.len();
-            let mut packet = MutableIcmpPacket::new(&mut buf[0..packet_len]).unwrap();
+            let (dst, data) = input.recv().expect("error receiving data");
+            len = IcmpPacket::minimum_packet_size() + 4 + data.len();
+            let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
             packet.set_icmp_type(code);
             let payload = packet.payload_mut();
-            payload[0..2].copy_from_slice(&endpoint.id.to_be_bytes());
-            payload[2..4].copy_from_slice(&seq.entry(endpoint).or_insert(0).to_be_bytes());
-            payload[4..].copy_from_slice(&block);
+            payload[0..2].copy_from_slice(&dst.id.to_be_bytes());
+            payload[2..4].copy_from_slice(&seq.entry(dst).or_insert(0).to_be_bytes());
+            payload[4..].copy_from_slice(&data);
             packet.set_checksum(pnet_packet::icmp::checksum(&packet.to_immutable()));
-            last_endpoint = endpoint;
-            tx.send_to(packet.consume_to_immutable(), IpAddr::from(endpoint.ip))
+            last_dst = dst;
+            tx.send_to(packet.consume_to_immutable(), IpAddr::from(dst.ip))
         };
-        resend_last_packet = match result {
+        resend = match result {
             Ok(_) => {
-                seq.entry(last_endpoint)
+                // Increment the seq. number
+                seq.entry(last_dst)
                     .and_modify(|s| *s = (Wrapping(*s) + Wrapping(1)).0);
                 false
             }
             Err(e) => match e.raw_os_error() {
+                // Sometimes attempting to send packets too fast will trigger a ENOBUF error
+                // (perhaps a driver-dependent issue). In this case we shall just attempt to resend
+                // that packet.
                 Some(105 /* ENOBUFS */) if cfg!(unix) => true,
                 _ => panic!("error sending ICMP packets: {}", e),
             },
@@ -140,7 +134,7 @@ mod platform_specific {
     use parking_lot::RwLock;
     use pnet_transport::TransportReceiver;
     use std::ffi::CString;
-    use std::mem;
+    use std::mem::{size_of, zeroed};
     use std::net::Ipv4Addr;
     use std::thread;
     use winapi::ctypes::c_int;
@@ -164,35 +158,41 @@ mod platform_specific {
             RwLock::new(unsafe { LOCAL_INTERFACE.and_then(|index| get_ip_from_index(index)) });
     }
 
+    unsafe fn alloc(size: usize) -> LPVOID {
+        HeapAlloc(GetProcessHeap(), 0, size)
+    }
+
+    unsafe fn free(ptr: LPVOID) {
+        HeapFree(GetProcessHeap(), 0, ptr);
+    }
+
     unsafe fn get_ip_from_index(index: IF_INDEX) -> Option<Ipv4Addr> {
-        let mut ptr =
-            HeapAlloc(GetProcessHeap(), 0, mem::size_of::<MIB_IPADDRTABLE>()) as PMIB_IPADDRTABLE;
+        let mut ptr = alloc(size_of::<MIB_IPADDRTABLE>()) as PMIB_IPADDRTABLE;
         let mut size = 0;
         if GetIpAddrTable(ptr, &mut size, 0) == ERROR_INSUFFICIENT_BUFFER {
-            HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
-            ptr = HeapAlloc(GetProcessHeap(), 0, size as usize) as PMIB_IPADDRTABLE;
+            free(ptr as LPVOID);
+            ptr = alloc(size as usize) as PMIB_IPADDRTABLE;
         }
         if GetIpAddrTable(ptr, &mut size, 0) == NO_ERROR {
             for i in 0..(*ptr).dwNumEntries {
                 let row = (*ptr).table.get_unchecked(i as usize);
                 if row.dwIndex == index {
-                    let octets = row.dwAddr.to_be_bytes();
-                    HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
-                    return Some(Ipv4Addr::new(octets[3], octets[2], octets[1], octets[0]));
+                    let octets = row.dwAddr.to_le_bytes();
+                    free(ptr as LPVOID);
+                    return Some(Ipv4Addr::from(octets));
                 }
             }
         }
-        HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+        free(ptr as LPVOID);
         None
     }
 
     unsafe fn guess_local_interface() -> Option<IF_INDEX> {
-        let mut ptr = HeapAlloc(GetProcessHeap(), 0, mem::size_of::<MIB_IPFORWARDTABLE>())
-            as PMIB_IPFORWARDTABLE;
+        let mut ptr = alloc(size_of::<MIB_IPFORWARDTABLE>()) as PMIB_IPFORWARDTABLE;
         let mut size = 0;
         if GetIpForwardTable(ptr, &mut size, 0) == ERROR_INSUFFICIENT_BUFFER {
-            HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
-            ptr = HeapAlloc(GetProcessHeap(), 0, size as usize) as PMIB_IPFORWARDTABLE;
+            free(ptr as LPVOID);
+            ptr = alloc(size as usize) as PMIB_IPFORWARDTABLE;
         }
         if GetIpForwardTable(ptr, &mut size, 0) == NO_ERROR {
             for i in 0..(*ptr).dwNumEntries {
@@ -200,32 +200,34 @@ mod platform_specific {
                 if row.dwForwardDest == INADDR_ANY
                     && row.dwForwardMask == INADDR_ANY
                     && row.dwForwardMetric1 != 0
-                // Exclude virtual TUN/TAP adapters
+                // dwForwardMetric 1 != 0 to exclude virtual TUN/TAP adapters
                 {
                     let ret = Some(row.dwForwardIfIndex);
-                    HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+                    free(ptr as LPVOID);
                     return ret;
                 }
             }
         }
-        HeapFree(GetProcessHeap(), 0, ptr as LPVOID);
+        free(ptr as LPVOID);
         None
     }
 
     pub fn prepare_receiver(tx: &TransportReceiver) {
         unsafe {
             let socket = tx.socket.fd as SOCKET;
-            let mut addr: SOCKADDR_IN = mem::zeroed();
-            addr.sin_family = AF_INET as ADDRESS_FAMILY;
-            addr.sin_port = ntohs(0);
             let ip = LOCAL_IP.read().expect("cannot guess the local ip");
             log::info!("raw socket bound to ip {}", ip);
-            let ip_str = CString::new(format!("{}", ip)).unwrap();
+            let ip_str = CString::new(ip.to_string()).unwrap();
+
+            let mut addr: SOCKADDR_IN = zeroed();
+            addr.sin_family = AF_INET as ADDRESS_FAMILY;
+            addr.sin_port = ntohs(0);
             *addr.sin_addr.S_un.S_addr_mut() = inet_addr(ip_str.as_ptr());
+
             let error = bind(
                 socket,
                 &addr as *const SOCKADDR_IN as *const SOCKADDR,
-                mem::size_of::<SOCKADDR_IN>() as c_int,
+                size_of::<SOCKADDR_IN>() as c_int,
             );
             if error == SOCKET_ERROR {
                 panic!(
@@ -257,7 +259,7 @@ mod platform_specific {
             thread::spawn(|| loop {
                 NotifyAddrChange(0 as PHANDLE, 0 as LPOVERLAPPED);
                 *LOCAL_IP.write() = LOCAL_INTERFACE.and_then(|index| get_ip_from_index(index));
-                // Luckily, we do not need to re-bind to socket, because when we bind the IP to the
+                // Luckily, we do not need to re-bind the socket, because when we bind the IP to the
                 // raw socket Windows actually binds that socket to the network adaptor. As long as
                 // the network adaptor does not change the change of local IP does not invalidate
                 // the socket.
