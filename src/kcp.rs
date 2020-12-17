@@ -258,8 +258,7 @@ impl Drop for KcpConnection {
                     break;
                 }
             }
-            let conv = self.state.control.lock().conv();
-            CONNECTION_STATE.remove(&(*self.state.endpoint.read(), conv));
+            CONNECTION_STATE.remove(&(*self.state.endpoint.read(), kcp.conv()));
             // CONNECTION_STATE.retain(|_, state| state.upgrade().is_some());
             #[rustfmt::skip]
             log::debug!("KCP connection dropped {}, {} remaining", self, CONNECTION_STATE.len());
