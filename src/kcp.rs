@@ -40,6 +40,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
+use winapi::_core::fmt::Formatter;
 
 struct KcpConnectionState {
     control: Mutex<KcpControlBlock>,
