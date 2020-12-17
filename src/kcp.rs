@@ -238,28 +238,30 @@ impl Drop for KcpConnection {
             let timeout = Instant::now().checked_add(CLOSE_TIMEOUT).unwrap();
             // Empty segment = FIN
             self.send(b"");
-            // If we are actively closing the connection
-            let mut kcp = self.state.control.lock();
-            if !self.state.closing.load(Ordering::SeqCst) {
-                // Also wait for the other side to send FIN
-                while !kcp.dead_link() {
-                    match kcp.recv() {
-                        Ok(data) if data.is_empty() => break,
-                        _ => {
-                            if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
-                                break;
+            {
+                let mut kcp = self.state.control.lock();
+                // If we are actively closing the connection
+                if !self.state.closing.load(Ordering::SeqCst) {
+                    // Also wait for the other side to send FIN
+                    while !kcp.dead_link() {
+                        match kcp.recv() {
+                            Ok(data) if data.is_empty() => break,
+                            _ => {
+                                if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
-            while !kcp.all_flushed() && !kcp.dead_link() {
-                if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
-                    break;
+                while !kcp.all_flushed() && !kcp.dead_link() {
+                    if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
+                        break;
+                    }
                 }
+                CONNECTION_STATE.remove(&(*self.state.endpoint.read(), kcp.conv()));
+                // CONNECTION_STATE.retain(|_, state| state.upgrade().is_some());
             }
-            CONNECTION_STATE.remove(&(*self.state.endpoint.read(), kcp.conv()));
-            // CONNECTION_STATE.retain(|_, state| state.upgrade().is_some());
             #[rustfmt::skip]
             log::debug!("KCP connection dropped {}, {} remaining", self, CONNECTION_STATE.len());
         }
