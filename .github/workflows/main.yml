@@ -3,15 +3,27 @@ on: [push]
 name: CI
 
 jobs:
-  build_and_test:
-    name: Build release
+  build:
+    name: Build and upload release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+        name: Checkout code
       - uses: actions-rs/toolchain@v1
+        name: Download toolchain
         with:
           toolchain: stable
       - uses: actions-rs/cargo@v1
+        name: Build project
         with:
           command: build
           args: --release
+      - uses: svenstaro/upload-release-action
+        name: Upload to release
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: target/release/ekho
+          tag: ${{ github.ref }}
+          asset_name: ekho-linux-amd64
+          override: true
+          prerelease: true
