@@ -116,6 +116,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 Ok(0) => break,
                 Ok(len) => to.send(&buf[..len]),
                 Err(err) if err.kind() == ErrorKind::ConnectionAborted => break,
+                Err(err) if err.kind() == ErrorKind::ConnectionReset => break,
                 Err(err) => handle_io_error(err)?,
             }
         }
@@ -140,9 +141,11 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 match to.write_all(&buf) {
                     Ok(()) => continue,
                     Err(err) if err.kind() == ErrorKind::ConnectionAborted => break,
+                    Err(err) if err.kind() == ErrorKind::ConnectionReset => break,
                     Err(err) => handle_io_error(err)?,
                 }
             } else if last_active.elapsed() >= INACTIVITY_TIMEOUT {
+                log::warn!("KCP relay {} inactive for too long", from);
                 break;
             }
         }

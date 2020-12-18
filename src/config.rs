@@ -23,6 +23,8 @@ pub struct KcpConfig {
     pub resend: u32,
     pub bbr: bool,
     pub rto_min: u32,
+    #[serde(default = "default_dead_link_threshold")]
+    pub dead_link_threshold: u32,
     #[serde(default = "default_bdp_gain")]
     pub bdp_gain: f64,
     #[serde(default = "default_kcp_send_window_size")]
@@ -32,6 +34,10 @@ pub struct KcpConfig {
 }
 
 static CONFIG: OnceCell<Config> = OnceCell::new();
+
+const fn default_dead_link_threshold() -> u32 {
+    16
+}
 
 const fn default_kcp_send_window_size() -> u16 {
     2048

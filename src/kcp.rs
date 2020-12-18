@@ -155,6 +155,7 @@ impl KcpConnection {
             kcp.set_bbr(config.bbr);
             kcp.set_bdp_gain(config.bdp_gain);
             kcp.set_rto_min(config.rto_min);
+            kcp.set_dead_link_threshold(config.dead_link_threshold);
         }
         CONNECTION_STATE.insert((endpoint, conv), Arc::downgrade(&state));
         Some(KcpConnection { state })
@@ -269,7 +270,7 @@ impl Drop for KcpConnection {
                 CONNECTION_STATE.remove(&(*self.state.endpoint.read(), kcp.conv()));
             }
             if timed_out {
-                log::warn!("Timed out when closing KCP connection {}", self);
+                log::warn!("timed out when closing KCP connection {}", self);
             }
             #[rustfmt::skip]
             log::debug!("KCP connection {} closed, {} remaining", self, CONNECTION_STATE.len());
@@ -283,6 +284,7 @@ pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
         let key = &(from, conv);
         if !CONNECTION_STATE.contains_key(key) && KcpControlBlock::first_push_packet(&packet) {
             let new_connection = KcpConnection::connect_with_conv(from, conv).unwrap();
+            log::debug!("incoming connection {}", new_connection);
             if let Err(e) = INCOMING.0.send(new_connection) {
                 log::error!("error adding incoming connection to the queue: {}", e);
             }

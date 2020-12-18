@@ -1002,6 +1002,10 @@ impl KcpControlBlock {
         self.rcv_wnd = max(recv, KCP_MAX_FRAGMENTS);
     }
 
+    pub fn set_dead_link_threshold(&mut self, thres: u32) {
+        self.dead_link_threshold = thres;
+    }
+
     pub fn dead_link(&self) -> bool {
         self.dead_link
     }
