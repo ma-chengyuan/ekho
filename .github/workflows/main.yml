@@ -25,5 +25,5 @@ jobs:
           file: target/release/ekho
           tag: ${{ github.ref }}
           asset_name: ekho-linux-amd64
-          override: true
+          overwrite: true
           prerelease: true
