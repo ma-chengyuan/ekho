@@ -23,7 +23,8 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: target/release/ekho
-          tag: ${{ github.ref }}
+          tag: latest
+          release_name: Automatic build from the latest source
           asset_name: ekho-linux-amd64
           overwrite: true
           prerelease: true
