@@ -18,7 +18,7 @@ jobs:
         with:
           command: build
           args: --release
-      - uses: svenstaro/upload-release-action
+      - uses: svenstaro/upload-release-action@v2
         name: Upload to release
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
