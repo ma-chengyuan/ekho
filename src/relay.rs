@@ -16,6 +16,7 @@ fn handle_io_error(err: Error) -> Result<()> {
             return Ok(());
         }
     }
+    log::error!("{:?}", err.kind());
     Err(err.into())
 }
 

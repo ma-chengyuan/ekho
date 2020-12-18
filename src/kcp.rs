@@ -234,12 +234,16 @@ impl fmt::Display for KcpConnection {
 
 impl Drop for KcpConnection {
     fn drop(&mut self) {
+        // Try to finalize the connection only when the current instance is the last one to own
+        // the reference to the self.state.
+        // Unexpected problems may arise if both connection are dropped exactly at the same time,
+        // but this situation would be extremely rare.
         if Arc::strong_count(&self.state) == 1 {
             let timeout = Instant::now().checked_add(CLOSE_TIMEOUT).unwrap();
             // Empty segment = FIN
-            self.send(b"");
             {
                 let mut kcp = self.state.control.lock();
+                kcp.send(b"").unwrap();
                 // If we are actively closing the connection
                 if !self.state.closing.load(Ordering::SeqCst) {
                     // Also wait for the other side to send FIN
@@ -260,7 +264,6 @@ impl Drop for KcpConnection {
                     }
                 }
                 CONNECTION_STATE.remove(&(*self.state.endpoint.read(), kcp.conv()));
-                // CONNECTION_STATE.retain(|_, state| state.upgrade().is_some());
             }
             #[rustfmt::skip]
             log::debug!("KCP connection dropped {}, {} remaining", self, CONNECTION_STATE.len());
@@ -289,6 +292,7 @@ pub fn on_recv_packet(packet: &[u8], from: IcmpEndpoint) {
             schedule_immediate_update(&state);
         }
     } else {
-        // TODO: Maybe simulate real ping behavior?
+        // Mimic real ICMP echo behavior
+        crate::icmp::send_packet(from, Vec::from(packet));
     }
 }
