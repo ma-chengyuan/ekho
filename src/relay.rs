@@ -114,11 +114,12 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
             match result {
                 Ok(0) => break,
                 Ok(len) => to.send(&buf[..len]),
+                Err(err) if err.kind() == ErrorKind::ConnectionAborted => break,
                 Err(err) => handle_io_error(err)?,
             }
         }
         if !should_stop.load(Ordering::SeqCst) {
-            log::debug!("TCP side closes the connection: {}", from.peer_addr()?);
+            log::debug!("TCP side closes relay to {}", to);
         }
         Ok(())
     }
@@ -133,11 +134,15 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
                 if buf.is_empty() {
                     break;
                 }
-                to.write_all(&buf)?;
+                match to.write_all(&buf) {
+                    Ok(()) => continue,
+                    Err(err) if err.kind() == ErrorKind::ConnectionAborted => break,
+                    Err(err) => handle_io_error(err)?,
+                }
             }
         }
         if !should_stop.load(Ordering::SeqCst) {
-            log::debug!("KCP side closes the connection: {}", from);
+            log::debug!("KCP side closes relay from {}", from);
         }
         Ok(())
     }
