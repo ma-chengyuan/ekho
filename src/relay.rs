@@ -3,9 +3,10 @@ use anyhow::Result;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const TIMEOUT: Duration = Duration::from_millis(100);
+const READ_TIMEOUT: Duration = Duration::from_millis(100);
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(3600);
 
 fn handle_io_error(err: Error) -> Result<()> {
     if let ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted = err.kind() {
@@ -58,7 +59,7 @@ pub fn relay_tcp(a: TcpStream, b: TcpStream) -> Result<()> {
                 // Set a timeout for the read operation to ensure the should_stop flag is regularly
                 // checked. The write time is usually negligible here so not setting a write timeout
                 // here to avoid complicating things.
-                from.set_read_timeout(Some(TIMEOUT))?;
+                from.set_read_timeout(Some(READ_TIMEOUT))?;
             }
             while !should_stop.load(Ordering::Relaxed) {
                 let result = from.read(&mut buf);
@@ -107,7 +108,7 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
     ) -> Result<()> {
         let mut buf = vec![0; to.mss()];
         if let Ok(None) = from.read_timeout() {
-            from.set_read_timeout(Some(TIMEOUT))?;
+            from.set_read_timeout(Some(READ_TIMEOUT))?;
         }
         while !should_stop.load(Ordering::SeqCst) {
             let result = from.read(&mut buf);
@@ -129,16 +130,20 @@ pub fn relay_kcp(tcp: TcpStream, kcp: KcpConnection) -> Result<()> {
         to: &mut TcpStream,
         should_stop: &AtomicBool,
     ) -> Result<()> {
+        let mut last_active = Instant::now();
         while !should_stop.load(Ordering::SeqCst) {
-            if let Some(buf) = from.recv_with_timeout(TIMEOUT) {
+            if let Some(buf) = from.recv_with_timeout(READ_TIMEOUT) {
                 if buf.is_empty() {
                     break;
                 }
+                last_active = Instant::now();
                 match to.write_all(&buf) {
                     Ok(()) => continue,
                     Err(err) if err.kind() == ErrorKind::ConnectionAborted => break,
                     Err(err) => handle_io_error(err)?,
                 }
+            } else if last_active.elapsed() >= INACTIVITY_TIMEOUT {
+                break;
             }
         }
         if !should_stop.load(Ordering::SeqCst) {

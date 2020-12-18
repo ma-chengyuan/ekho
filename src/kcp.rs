@@ -240,6 +240,7 @@ impl Drop for KcpConnection {
         // but this situation would be extremely rare.
         if Arc::strong_count(&self.state) == 1 {
             let timeout = Instant::now().checked_add(CLOSE_TIMEOUT).unwrap();
+            let mut timed_out = false;
             // Empty segment = FIN
             {
                 let mut kcp = self.state.control.lock();
@@ -252,6 +253,7 @@ impl Drop for KcpConnection {
                             Ok(data) if data.is_empty() => break,
                             _ => {
                                 if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
+                                    timed_out = true;
                                     break;
                                 }
                             }
@@ -260,13 +262,17 @@ impl Drop for KcpConnection {
                 }
                 while !kcp.all_flushed() && !kcp.dead_link() {
                     if self.state.condvar.wait_until(&mut kcp, timeout).timed_out() {
+                        timed_out = true;
                         break;
                     }
                 }
                 CONNECTION_STATE.remove(&(*self.state.endpoint.read(), kcp.conv()));
             }
+            if timed_out {
+                log::warn!("Timed out when closing KCP connection {}", self);
+            }
             #[rustfmt::skip]
-            log::debug!("KCP connection dropped {}, {} remaining", self, CONNECTION_STATE.len());
+            log::debug!("KCP connection {} closed, {} remaining", self, CONNECTION_STATE.len());
         }
     }
 }
