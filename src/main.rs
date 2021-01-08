@@ -1,55 +1,36 @@
-mod client;
 mod config;
 mod icmp;
 mod kcp;
-mod relay;
-mod server;
+mod session;
 mod socks5;
 
 use crate::config::get_config;
-use log::LevelFilter;
-use parking_lot::deadlock;
 use std::env;
-use std::thread;
 
-fn main() {
-    env_logger::Builder::new()
-        .filter_level(LevelFilter::Debug)
-        .format_timestamp_millis()
-        .init();
-
-    log::info!("Ekho 0.1.0 by Chengyuan Ma 2020");
-
+#[tokio::main]
+async fn main() {
     let config_path = env::args()
         .nth(1)
         .unwrap_or_else(|| String::from("config.toml"));
 
-    config::load_config_from_file(config_path);
-    kcp::init_kcp_scheduler();
+    config::load_config_from_file(config_path).await;
     icmp::init_send_recv_loop();
 
-    thread::spawn(move || loop {
-        thread::sleep(std::time::Duration::from_secs(2));
-        let deadlocks = deadlock::check_deadlock();
-        if deadlocks.is_empty() {
-            continue;
-        }
-
-        log::info!("{} deadlocks detected", deadlocks.len());
-        for (i, threads) in deadlocks.iter().enumerate() {
-            log::info!("Deadlock #{}", i);
-            for t in threads {
-                log::info!("Thread Id {:#?}", t.thread_id());
-                log::info!("{:#?}", t.backtrace());
-            }
-        }
-    });
-
     if get_config().remote.is_none() {
-        server::run_server();
-    // server::test_file_upload();
+        let mut session = session::Session::incoming().await;
+        tracing::info!("received session: {}", session);
+        session.sender.send(vec![1, 1, 4, 5, 1, 4]).await.unwrap();
+        tracing::info!("data sent");
+        session.close().await;
+        tracing::info!("closed");
+        // server::test_file_upload();
     } else {
-        client::run_client();
+        let mut session = session::Session::new(get_config().remote.unwrap(), 998244353);
+        session.sender.send(vec![1]).await.unwrap();
+        let res = session.receiver.recv().await.unwrap();
+        tracing::info!("received: {:?}", res);
+        session.close().await;
+        tracing::info!("closed");
         // client::test_file_download();
     }
 }

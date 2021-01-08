@@ -4,4 +4,6 @@
 /legacy
 /res
 /Cargo.lock
+/kcp
+/.vscode
 config.toml

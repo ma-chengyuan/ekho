@@ -2,8 +2,8 @@
 #![allow(clippy::type_complexity)]
 
 use crate::config::get_config;
-use crossbeam_channel::{Receiver, Sender};
 use lazy_static::lazy_static;
+use parking_lot::Mutex;
 use pnet_packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::{MutablePacket, Packet};
@@ -12,12 +12,13 @@ use pnet_transport::{
     TransportReceiver, TransportSender,
 };
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::convert::TryInto;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
 use std::thread;
-use std::thread_local;
+use std::fmt;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use rustc_hash::FxHashMap;
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
 pub struct IcmpEndpoint {
@@ -25,16 +26,24 @@ pub struct IcmpEndpoint {
     pub id: u16,
 }
 
-pub type PacketWithEndpoint = (IcmpEndpoint, Vec<u8>);
-lazy_static! {
-    static ref CHANNEL: (Sender<PacketWithEndpoint>, Receiver<PacketWithEndpoint>) =
-        // crossbeam_channel::bounded(get_config().icmp.send_buffer_size);
-        crossbeam_channel::unbounded();
+impl fmt::Display for IcmpEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.ip, self.id)
+    }
 }
 
-pub fn send_packet(to: IcmpEndpoint, packet: Vec<u8>) {
-    thread_local!(static LOCAL_SENDER: Sender<PacketWithEndpoint> = CHANNEL.0.clone());
-    LOCAL_SENDER.with(|sender| sender.send((to, packet)).unwrap());
+type Sender = UnboundedSender<(IcmpEndpoint, Vec<u8>)>;
+type Receiver = UnboundedReceiver<(IcmpEndpoint, Vec<u8>)>;
+
+lazy_static! {
+    static ref CHANNEL: (Mutex<Sender>, Mutex<Receiver>) = {
+        let (tx, rx) = unbounded_channel();
+        (Mutex::new(tx), Mutex::new(rx))
+    };
+}
+
+pub fn clone_sender() -> Sender {
+    CHANNEL.0.lock().clone()
 }
 
 pub fn init_send_recv_loop() {
@@ -45,7 +54,7 @@ pub fn init_send_recv_loop() {
     .expect("error creating transport channel");
     platform_impl::prepare_receiver(&rx);
     thread::spawn(move || recv_loop(&mut rx));
-    thread::spawn(move || send_loop(&mut tx, CHANNEL.1.clone()));
+    thread::spawn(move || send_loop(&mut tx));
 }
 
 fn recv_loop(rx: &mut TransportReceiver) {
@@ -63,18 +72,18 @@ fn recv_loop(rx: &mut TransportReceiver) {
                         ip: ipv4,
                         id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
                     };
-                    crate::kcp::on_recv_packet(&payload[4..], endpoint);
+                    crate::session::on_recv_packet(endpoint, &payload[4..]);
                 }
             }
         }
     }
 }
 
-fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
+fn send_loop(tx: &mut TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
     let mut resend = false;
     let mut len = 0usize;
-    let mut seq: HashMap<IcmpEndpoint, u16> = HashMap::new();
+    let mut seq: FxHashMap<IcmpEndpoint, u16> = FxHashMap::default();
     let code = match get_config().remote {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
@@ -90,12 +99,12 @@ fn send_loop(tx: &mut TransportSender, input: Receiver<PacketWithEndpoint>) {
                 IpAddr::from(last_dst.ip),
             )
         } else {
-            let (dst, data) = input.recv().expect("error receiving data");
+            let (dst, data) = CHANNEL.1.lock().blocking_recv().unwrap();
             len = IcmpPacket::minimum_packet_size() + 4 + data.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
             packet.set_icmp_type(code);
             let payload = packet.payload_mut();
-            payload[0..2].copy_from_slice(&dst.id.to_be_bytes());
+            payload[..2].copy_from_slice(&dst.id.to_be_bytes());
             payload[2..4].copy_from_slice(&seq.entry(dst).or_insert(0).to_be_bytes());
             payload[4..].copy_from_slice(&data);
             packet.set_checksum(pnet_packet::icmp::checksum(&packet.to_immutable()));
@@ -216,7 +225,7 @@ mod platform_impl {
         unsafe {
             let socket = tx.socket.fd as SOCKET;
             let ip = LOCAL_IP.read().expect("cannot guess the local ip");
-            log::info!("raw socket bound to ip {}", ip);
+            tracing::debug!("raw socket bound to ip {}", ip);
             let ip_str = CString::new(ip.to_string()).unwrap();
 
             let mut addr: SOCKADDR_IN = zeroed();
@@ -260,10 +269,10 @@ mod platform_impl {
                 NotifyAddrChange(0 as PHANDLE, 0 as LPOVERLAPPED);
                 *LOCAL_IP.write() = LOCAL_INTERFACE.and_then(|index| get_ip_from_index(index));
                 // Luckily, we do not need to re-bind the socket, because when we bind the IP to the
-                // raw socket Windows actually binds that socket to the network adaptor. As long as
-                // the network adaptor does not change the change of local IP does not invalidate
+                // raw socket Windows actually binds that socket to the network adapter. As long as
+                // the network adapter does not change the change of local IP does not invalidate
                 // the socket.
-                log::info!("Local IP changed to {:?}", LOCAL_IP.read());
+                tracing::debug!("Local IP changed to {:?}", LOCAL_IP.read());
             });
         }
     }
