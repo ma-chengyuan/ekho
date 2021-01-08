@@ -3,7 +3,6 @@
 
 use crate::config::get_config;
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
 use pnet_packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::{MutablePacket, Packet};
@@ -11,14 +10,15 @@ use pnet_transport::{
     icmp_packet_iter, transport_channel, TransportChannelType, TransportProtocol,
     TransportReceiver, TransportSender,
 };
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 use std::convert::TryInto;
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
-use std::thread;
-use std::fmt;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use rustc_hash::FxHashMap;
+use tokio::sync::Mutex;
+use tokio::task;
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
 pub struct IcmpEndpoint {
@@ -42,25 +42,30 @@ lazy_static! {
     };
 }
 
-pub fn clone_sender() -> Sender {
-    CHANNEL.0.lock().clone()
+pub async fn clone_sender() -> Sender {
+    CHANNEL.0.lock().await.clone()
 }
 
-pub fn init_send_recv_loop() {
+pub async fn init_send_recv_loop() {
     let (mut tx, mut rx) = transport_channel(
         8192,
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
     .expect("error creating transport channel");
     platform_impl::prepare_receiver(&rx);
-    thread::spawn(move || recv_loop(&mut rx));
-    thread::spawn(move || send_loop(&mut tx));
+    task::spawn(async move {
+        recv_loop(&mut rx).await;
+    });
+    task::spawn(async move {
+        send_loop(&mut tx).await;
+    });
 }
 
-fn recv_loop(rx: &mut TransportReceiver) {
+async fn recv_loop(rx: &mut TransportReceiver) {
     let mut iter = icmp_packet_iter(rx);
     loop {
-        let (packet, addr) = iter.next().expect("error receiving ICMP packet");
+        let (packet, addr) =
+            task::block_in_place(|| iter.next()).expect("error receiving ICMP packet");
         if let IpAddr::V4(ipv4) = addr {
             if platform_impl::filter_local_ip(ipv4) {
                 let payload = packet.payload();
@@ -72,14 +77,14 @@ fn recv_loop(rx: &mut TransportReceiver) {
                         ip: ipv4,
                         id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
                     };
-                    crate::session::on_recv_packet(endpoint, &payload[4..]);
+                    crate::session::on_recv_packet(endpoint, &payload[4..]).await;
                 }
             }
         }
     }
 }
 
-fn send_loop(tx: &mut TransportSender) {
+async fn send_loop(tx: &mut TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
     let mut resend = false;
     let mut len = 0usize;
@@ -92,14 +97,17 @@ fn send_loop(tx: &mut TransportSender) {
         ip: Ipv4Addr::UNSPECIFIED,
         id: 0,
     };
+    let mut receiver = CHANNEL.1.lock().await;
     loop {
         let result = if resend {
-            tx.send_to(
-                IcmpPacket::new(&buf[..len]).unwrap(),
-                IpAddr::from(last_dst.ip),
-            )
+            task::block_in_place(|| {
+                tx.send_to(
+                    IcmpPacket::new(&buf[..len]).unwrap(),
+                    IpAddr::from(last_dst.ip),
+                )
+            })
         } else {
-            let (dst, data) = CHANNEL.1.lock().blocking_recv().unwrap();
+            let (dst, data) = receiver.recv().await.unwrap();
             len = IcmpPacket::minimum_packet_size() + 4 + data.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
             packet.set_icmp_type(code);
@@ -109,7 +117,7 @@ fn send_loop(tx: &mut TransportSender) {
             payload[4..].copy_from_slice(&data);
             packet.set_checksum(pnet_packet::icmp::checksum(&packet.to_immutable()));
             last_dst = dst;
-            tx.send_to(packet.consume_to_immutable(), IpAddr::from(dst.ip))
+            task::block_in_place(|| tx.send_to(packet.consume_to_immutable(), IpAddr::from(dst.ip)))
         };
         resend = match result {
             Ok(_) => {

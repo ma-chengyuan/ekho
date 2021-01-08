@@ -14,7 +14,7 @@ async fn main() {
         .unwrap_or_else(|| String::from("config.toml"));
 
     config::load_config_from_file(config_path).await;
-    icmp::init_send_recv_loop();
+    icmp::init_send_recv_loop().await;
 
     if get_config().remote.is_none() {
         let mut session = session::Session::incoming().await;
@@ -23,7 +23,7 @@ async fn main() {
         tracing::info!("data sent");
         session.close().await;
         tracing::info!("closed");
-        // server::test_file_upload();
+    // server::test_file_upload();
     } else {
         let mut session = session::Session::new(get_config().remote.unwrap(), 998244353);
         session.sender.send(vec![1]).await.unwrap();

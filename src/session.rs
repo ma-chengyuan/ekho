@@ -25,23 +25,23 @@ use crate::icmp::IcmpEndpoint;
 use crate::kcp::ControlBlock;
 use chacha20poly1305::aead::{Aead, AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use std::fmt;
 use dashmap::DashMap;
-use rustc_hash::FxHasher;
-use std::hash::BuildHasherDefault;
 use lazy_static::lazy_static;
+use rustc_hash::FxHasher;
+use std::fmt;
+use std::hash::BuildHasherDefault;
 use tokio::select;
 use tokio::sync::mpsc::{
     channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tokio::task;
 use tokio::sync::Mutex;
+use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, sleep_until, Duration, Instant};
 
 lazy_static! {
-    static ref RAW_TX: DashMap<(IcmpEndpoint, u32), Sender<Vec<u8>>, BuildHasherDefault<FxHasher>>
-        = Default::default();
+    static ref RAW_TX: DashMap<(IcmpEndpoint, u32), Sender<Vec<u8>>, BuildHasherDefault<FxHasher>> =
+        Default::default();
     static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&get_config().key);
     static ref NONCE: Nonce = Nonce::default();
     static ref INCOMING: (UnboundedSender<Session>, Mutex<UnboundedReceiver<Session>>) = {
@@ -77,7 +77,7 @@ impl Session {
             let mut next_update = start;
             let mut kcp = ControlBlock::new(conv, get_config().kcp.clone());
             let send_wnd = get_config().kcp.send_wnd as usize;
-            let icmp_tx = crate::icmp::clone_sender();
+            let icmp_tx = crate::icmp::clone_sender().await;
             let mut local_closing = false;
             let mut peer_closing = false;
             'u: while !(kcp.dead_link() || local_closing && peer_closing && kcp.all_flushed()) {
@@ -154,17 +154,25 @@ impl fmt::Display for Session {
     }
 }
 
-pub fn on_recv_packet(from: IcmpEndpoint, raw: &[u8]) {
+pub async fn on_recv_packet(from: IcmpEndpoint, raw: &[u8]) {
     if let Ok(raw) = CIPHER.decrypt(&NONCE, raw) {
         let conv = crate::kcp::conv_from_raw(&raw);
         let key = &(from, conv);
         if !RAW_TX.contains_key(key) && crate::kcp::first_push_packet(&raw) {
             // The receiver of INCOMING obviously never closes, so unwrapping is safe here
-            INCOMING.0.send(Session::new(from, conv)).unwrap_or_default();
+            INCOMING
+                .0
+                .send(Session::new(from, conv))
+                .unwrap_or_default();
         }
         if let Some(raw_tx) = RAW_TX.get(key) {
             if let Err(_err) = raw_tx.blocking_send(raw) {
-                tracing::error!("error feeding raw packets to {}:{}@{}", from.ip, from.id, conv);
+                tracing::error!(
+                    "error feeding raw packets to {}:{}@{}",
+                    from.ip,
+                    from.id,
+                    conv
+                );
             }
         }
     }
