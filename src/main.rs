@@ -19,6 +19,7 @@ async fn main() -> Result<()> {
 
     config::load_config_from_file(config_path).await?;
     icmp::init_send_recv_loop().await?;
+    session::init_recv_loop().await;
 
     if get_config().remote.is_none() {
         let mut session = session::Session::incoming().await;

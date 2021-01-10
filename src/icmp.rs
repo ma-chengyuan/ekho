@@ -5,6 +5,7 @@
 use crate::config::get_config;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
+use parking_lot::Mutex as SyncMutex;
 use pnet_packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
 use pnet_packet::{MutablePacket, Packet};
@@ -18,9 +19,9 @@ use std::convert::TryInto;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
+use std::thread;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tokio::task;
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
 pub struct IcmpEndpoint {
@@ -38,14 +39,22 @@ type Sender = UnboundedSender<(IcmpEndpoint, Vec<u8>)>;
 type Receiver = UnboundedReceiver<(IcmpEndpoint, Vec<u8>)>;
 
 lazy_static! {
-    static ref CHANNEL: (Mutex<Sender>, Mutex<Receiver>) = {
+    static ref TX_CHANNEL: (Mutex<Sender>, SyncMutex<Receiver>) = {
         let (tx, rx) = unbounded_channel();
-        (Mutex::new(tx), Mutex::new(rx))
+        (Mutex::new(tx), SyncMutex::new(rx))
+    };
+    static ref RX_CHANNEL: (SyncMutex<Sender>, Mutex<Receiver>) = {
+        let (tx, rx) = unbounded_channel();
+        (SyncMutex::new(tx), Mutex::new(rx))
     };
 }
 
 pub async fn clone_sender() -> Sender {
-    CHANNEL.0.lock().await.clone()
+    TX_CHANNEL.0.lock().await.clone()
+}
+
+pub async fn receive_packet() -> (IcmpEndpoint, Vec<u8>) {
+    RX_CHANNEL.1.lock().await.recv().await.unwrap()
 }
 
 pub async fn init_send_recv_loop() -> Result<()> {
@@ -66,16 +75,16 @@ pub async fn init_send_recv_loop() -> Result<()> {
         )
     })?;
     platform_impl::prepare_receiver(&rx)?;
-    task::spawn(recv_loop(rx));
-    task::spawn(send_loop(tx));
+    thread::spawn(move || recv_loop(rx));
+    thread::spawn(move || send_loop(tx));
     Ok(())
 }
 
-async fn recv_loop(mut rx: TransportReceiver) {
+fn recv_loop(mut rx: TransportReceiver) {
     let mut iter = icmp_packet_iter(&mut rx);
+    let sender = RX_CHANNEL.0.lock();
     loop {
-        let (packet, addr) =
-            task::block_in_place(|| iter.next()).expect("error receiving ICMP packet");
+        let (packet, addr) = iter.next().expect("error receiving ICMP packet");
         if let IpAddr::V4(ipv4) = addr {
             if platform_impl::filter_local_ip(ipv4) {
                 let payload = packet.payload();
@@ -87,14 +96,14 @@ async fn recv_loop(mut rx: TransportReceiver) {
                         ip: ipv4,
                         id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
                     };
-                    crate::session::on_recv_packet(endpoint, &payload[4..]).await;
+                    sender.send((endpoint, Vec::from(&payload[4..]))).unwrap();
                 }
             }
         }
     }
 }
 
-async fn send_loop(mut tx: TransportSender) {
+fn send_loop(mut tx: TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
     let mut resend = false;
     let mut len = 0usize;
@@ -107,17 +116,15 @@ async fn send_loop(mut tx: TransportSender) {
         ip: Ipv4Addr::UNSPECIFIED,
         id: 0,
     };
-    let mut receiver = CHANNEL.1.lock().await;
+    let mut receiver = TX_CHANNEL.1.lock();
     loop {
         let result = if resend {
-            task::block_in_place(|| {
-                tx.send_to(
-                    IcmpPacket::new(&buf[..len]).unwrap(),
-                    IpAddr::from(last_dst.ip),
-                )
-            })
+            tx.send_to(
+                IcmpPacket::new(&buf[..len]).unwrap(),
+                IpAddr::from(last_dst.ip),
+            )
         } else {
-            let (dst, data) = receiver.recv().await.unwrap();
+            let (dst, data) = receiver.blocking_recv().unwrap();
             len = IcmpPacket::minimum_packet_size() + 4 + data.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
             packet.set_icmp_type(code);
@@ -127,7 +134,7 @@ async fn send_loop(mut tx: TransportSender) {
             payload[4..].copy_from_slice(&data);
             packet.set_checksum(pnet_packet::icmp::checksum(&packet.to_immutable()));
             last_dst = dst;
-            task::block_in_place(|| tx.send_to(packet.consume_to_immutable(), IpAddr::from(dst.ip)))
+            tx.send_to(packet.consume_to_immutable(), IpAddr::from(dst.ip))
         };
         resend = match result {
             Ok(_) => {

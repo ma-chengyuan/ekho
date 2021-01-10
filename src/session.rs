@@ -154,19 +154,22 @@ impl fmt::Display for Session {
     }
 }
 
-pub async fn on_recv_packet(from: IcmpEndpoint, raw: &[u8]) {
-    if let Ok(raw) = CIPHER.decrypt(&NONCE, raw) {
+async fn recv_loop() {
+    loop {
+        let (from, mut raw) = crate::icmp::receive_packet().await;
+        if CIPHER.decrypt_in_place(&NONCE, b"", &mut raw).is_err() {
+            // TODO: mimic normal ping behavior
+            continue;
+        }
         let conv = crate::kcp::conv_from_raw(&raw);
         let key = &(from, conv);
         if !RAW_TX.contains_key(key) && crate::kcp::first_push_packet(&raw) {
             // The receiver of INCOMING obviously never closes, so unwrapping is safe here
-            INCOMING
-                .0
-                .send(Session::new(from, conv))
-                .unwrap_or_default();
+            let new_session = Session::new(from, conv);
+            INCOMING.0.send(new_session).unwrap_or_default();
         }
         if let Some(raw_tx) = RAW_TX.get(key) {
-            if let Err(_err) = raw_tx.blocking_send(raw) {
+            if let Err(_err) = raw_tx.send(raw).await {
                 tracing::error!(
                     "error feeding raw packets to {}:{}@{}",
                     from.ip,
@@ -176,4 +179,8 @@ pub async fn on_recv_packet(from: IcmpEndpoint, raw: &[u8]) {
             }
         }
     }
+}
+
+pub async fn init_recv_loop() {
+    task::spawn(recv_loop());
 }
