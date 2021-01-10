@@ -186,6 +186,7 @@ mod platform_impl {
     use winapi::um::iphlpapi::{GetIpAddrTable, GetIpForwardTable, NotifyAddrChange};
     use winapi::um::minwinbase::LPOVERLAPPED;
     use winapi::um::winsock2::{bind, inet_addr, ntohs, WSAIoctl, SOCKET, SOCKET_ERROR};
+    use tracing::debug;
 
     lazy_static! {
         static ref LOCAL_INTERFACE: Option<IF_INDEX> = unsafe { guess_local_interface() };
@@ -251,7 +252,7 @@ mod platform_impl {
         unsafe {
             let socket = tx.socket.fd as SOCKET;
             let ip = LOCAL_IP.read().context("cannot guess the local ip")?;
-            tracing::debug!("raw socket bound to ip {}", ip);
+            debug!("raw socket bound to ip {}", ip);
             let ip_str = CString::new(ip.to_string())?;
 
             let mut addr: SOCKADDR_IN = zeroed();
@@ -292,7 +293,7 @@ mod platform_impl {
                 // raw socket Windows actually binds that socket to the network adapter. As long as
                 // the network adapter does not change the change of local IP does not invalidate
                 // the socket.
-                tracing::debug!("Local IP changed to {:?}", LOCAL_IP.read());
+                debug!("Local IP changed to {:?}", LOCAL_IP.read());
             });
             Ok(())
         }
@@ -311,7 +312,7 @@ mod platform_impl {
 
     pub fn prepare_receiver(_tx: &TransportReceiver) -> Result<()> {
         if let Ok(status) = std::fs::read_to_string("/proc/sys/net/ipv4/icmp_echo_ignore_all") {
-            if status.parse()? != 1 {
+            if status != "1" {
                 bail!("sysctl net.ipv4.icmp_echo_ignore_all should be 1 for Ekho to run properly");
             }
         }

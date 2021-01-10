@@ -23,7 +23,7 @@ use crate::config::get_config;
 use crate::icmp::IcmpEndpoint;
 
 use crate::kcp::ControlBlock;
-use chacha20poly1305::aead::{Aead, AeadInPlace, NewAead};
+use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
@@ -38,6 +38,7 @@ use tokio::sync::Mutex;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, sleep_until, Duration, Instant};
+use tracing::{info, error};
 
 lazy_static! {
     static ref RAW_TX: DashMap<(IcmpEndpoint, u32), Sender<Vec<u8>>, BuildHasherDefault<FxHasher>> =
@@ -110,7 +111,7 @@ impl Session {
                         // safe here.
                         icmp_tx.send((peer, raw)).unwrap();
                     } else {
-                        tracing::error!("error encrypting block");
+                        error!("error encrypting block");
                         break 'u;
                     }
                 }
@@ -143,7 +144,7 @@ impl Session {
             _ = sleep(CLOSE_TIMEOUT) => {}
             // If we take the initiative, then here we wait for an empty segment from the peer
             // If we are passive, then closing should already contain values
-            _ = &mut self.updater => tracing::info!("{} ended normally", self)
+            _ = &mut self.updater => info!("{} ended normally", self)
         }
     }
 }
@@ -170,7 +171,7 @@ async fn recv_loop() {
         }
         if let Some(raw_tx) = RAW_TX.get(key) {
             if let Err(_err) = raw_tx.send(raw).await {
-                tracing::error!(
+                error!(
                     "error feeding raw packets to {}:{}@{}",
                     from.ip,
                     from.id,
