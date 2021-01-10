@@ -65,7 +65,7 @@ pub async fn init_send_recv_loop() -> Result<()> {
     .with_context(|| {
         format!(
             "failed to create ICMP socket ({})",
-            if cfg!(linux) {
+            if cfg!(target_os = "linux") {
                 "Ekho needs to be run either as root or with NET_CAP_RAW"
             } else if cfg!(windows) {
                 "Ekho needs to be run with administrator privilege"
@@ -314,7 +314,7 @@ mod platform_impl {
     pub fn prepare_receiver(_tx: &TransportReceiver) -> Result<()> {
         if let Ok(status) = std::fs::read_to_string("/proc/sys/net/ipv4/icmp_echo_ignore_all") {
             info!("sysctl net.ipv4.icmp_echo_ignore_all = {}", status);
-            if status.parse::<i32>()? != 1 {
+            if status.trim().parse::<i32>()? != 1 {
                 bail!("sysctl net.ipv4.icmp_echo_ignore_all should be 1 for Ekho to run properly");
             }
         }
