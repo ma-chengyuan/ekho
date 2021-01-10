@@ -309,9 +309,11 @@ mod platform_impl {
     use anyhow::{bail, Result};
     use pnet_transport::TransportReceiver;
     use std::net::Ipv4Addr;
+    use tracing::info;
 
     pub fn prepare_receiver(_tx: &TransportReceiver) -> Result<()> {
         if let Ok(status) = std::fs::read_to_string("/proc/sys/net/ipv4/icmp_echo_ignore_all") {
+            info!("sysctl net.ipv4.icmp_echo_ignore_all = {}", status);
             if status != "1" {
                 bail!("sysctl net.ipv4.icmp_echo_ignore_all should be 1 for Ekho to run properly");
             }
