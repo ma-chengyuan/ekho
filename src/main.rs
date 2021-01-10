@@ -7,12 +7,11 @@ mod socks5;
 use crate::config::get_config;
 use anyhow::Result;
 use std::env;
-use tracing::{info};
+use tracing::{info, Level};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
+    tracing_subscriber::fmt().with_max_level(Level::DEBUG).init();
 
     let config_path = env::args()
         .nth(1)

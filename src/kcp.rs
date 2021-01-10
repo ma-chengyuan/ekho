@@ -509,6 +509,7 @@ impl ControlBlock {
     /// Removes the packet from the [send buffer](#structfield.send_buf) whose sequence number is `sn`
     /// marks it as acknowledged.
     fn ack_packet_with_sn(&mut self, sn: u32) {
+        tracing::debug!("ack sn {} {} {}", sn, self.send_una, self.send_nxt);
         if sn < self.send_una || sn >= self.send_nxt {
             return;
         }
@@ -530,6 +531,7 @@ impl ControlBlock {
     fn ack_packets_before_una(&mut self, una: u32) {
         while !self.send_buf.is_empty() && self.send_buf[0].sn < una {
             let seg = self.send_buf.pop_front().unwrap();
+            tracing::debug!("ack una {} < {}", seg.sn, una);
             self.update_bbr_on_ack(&seg);
         }
     }
@@ -610,6 +612,7 @@ impl ControlBlock {
             self.update_una();
             match cmd {
                 Command::Ack => {
+                    tracing::debug!("ack received {}", sn);
                     self.ack_packet_with_sn(sn);
                     self.update_una();
                     if !has_ack || sn > sn_max_ack {
@@ -707,6 +710,7 @@ impl ControlBlock {
             seg.sn = sn;
             seg.ts = ts;
             flush_segment(&mut self.buffer, &mut self.output, self.config.mtu, &seg);
+            tracing::debug!("ack sent {}", sn);
         }
         seg.sn = 0;
         seg.ts = 0;
