@@ -1,4 +1,5 @@
 use crate::icmp::IcmpEndpoint;
+use anyhow::{Context, Result};
 use chacha20poly1305::Key;
 use once_cell::sync::OnceCell;
 use serde::de::{Error, Visitor};
@@ -38,12 +39,14 @@ pub fn get_config() -> &'static Config {
     CONFIG.get().expect("config not initialized")
 }
 
-pub async fn load_config_from_file(path: impl AsRef<Path>) {
+pub async fn load_config_from_file(path: impl AsRef<Path>) -> Result<()> {
     let content = tokio::fs::read_to_string(path)
         .await
-        .expect("cannot find specified config file");
-    let config = toml::from_str(&content).expect("error parsing config file");
+        .context("loading config")?;
+    let config = toml::from_str(&content).context("parsing config file")?;
     CONFIG
         .set(config)
-        .expect("error setting OnceCell for Config");
+        .ok()
+        .context("error setting OnceCell for Config")?;
+    Ok(())
 }

@@ -1,7 +1,9 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::type_complexity)]
+#![allow(clippy::if_same_then_else)]
 
 use crate::config::get_config;
+use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use pnet_packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
@@ -46,23 +48,31 @@ pub async fn clone_sender() -> Sender {
     CHANNEL.0.lock().await.clone()
 }
 
-pub async fn init_send_recv_loop() {
-    let (mut tx, mut rx) = transport_channel(
+pub async fn init_send_recv_loop() -> Result<()> {
+    let (tx, rx) = transport_channel(
         8192,
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
-    .expect("error creating transport channel");
-    platform_impl::prepare_receiver(&rx);
-    task::spawn(async move {
-        recv_loop(&mut rx).await;
-    });
-    task::spawn(async move {
-        send_loop(&mut tx).await;
-    });
+    .with_context(|| {
+        format!(
+            "failed to create ICMP socket ({})",
+            if cfg!(linux) {
+                "Ekho needs to be run either as root or with NET_CAP_RAW"
+            } else if cfg!(windows) {
+                "Ekho needs to be run with administrator privilege"
+            } else {
+                "Ekho needs to be run with a higher privilege to be able to set up ICMP socket"
+            }
+        )
+    })?;
+    platform_impl::prepare_receiver(&rx)?;
+    task::spawn(recv_loop(rx));
+    task::spawn(send_loop(tx));
+    Ok(())
 }
 
-async fn recv_loop(rx: &mut TransportReceiver) {
-    let mut iter = icmp_packet_iter(rx);
+async fn recv_loop(mut rx: TransportReceiver) {
+    let mut iter = icmp_packet_iter(&mut rx);
     loop {
         let (packet, addr) =
             task::block_in_place(|| iter.next()).expect("error receiving ICMP packet");
@@ -84,7 +94,7 @@ async fn recv_loop(rx: &mut TransportReceiver) {
     }
 }
 
-async fn send_loop(tx: &mut TransportSender) {
+async fn send_loop(mut tx: TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
     let mut resend = false;
     let mut len = 0usize;
@@ -147,6 +157,7 @@ async fn send_loop(tx: &mut TransportSender) {
 /// 2. Filters out outgoing packets by their source IP.
 #[cfg(windows)]
 mod platform_impl {
+    use anyhow::{Context, Result};
     use lazy_static::lazy_static;
     use parking_lot::RwLock;
     use pnet_transport::TransportReceiver;
@@ -229,12 +240,12 @@ mod platform_impl {
         None
     }
 
-    pub fn prepare_receiver(tx: &TransportReceiver) {
+    pub fn prepare_receiver(tx: &TransportReceiver) -> Result<()> {
         unsafe {
             let socket = tx.socket.fd as SOCKET;
-            let ip = LOCAL_IP.read().expect("cannot guess the local ip");
+            let ip = LOCAL_IP.read().context("cannot guess the local ip")?;
             tracing::debug!("raw socket bound to ip {}", ip);
-            let ip_str = CString::new(ip.to_string()).unwrap();
+            let ip_str = CString::new(ip.to_string())?;
 
             let mut addr: SOCKADDR_IN = zeroed();
             addr.sin_family = AF_INET as ADDRESS_FAMILY;
@@ -247,10 +258,7 @@ mod platform_impl {
                 size_of::<SOCKADDR_IN>() as c_int,
             );
             if error == SOCKET_ERROR {
-                panic!(
-                    "error binding the socket: {}",
-                    std::io::Error::last_os_error()
-                );
+                return Err(std::io::Error::last_os_error().into());
             }
             // This step is necessary for ICMP raw socket as well
             let in_opt = RCVALL_IPLEVEL.to_le_bytes();
@@ -268,10 +276,7 @@ mod platform_impl {
                 None,
             );
             if error == SOCKET_ERROR {
-                panic!(
-                    "error setting io control: {}",
-                    std::io::Error::last_os_error()
-                );
+                return Err(std::io::Error::last_os_error().into());
             }
             thread::spawn(|| loop {
                 NotifyAddrChange(0 as PHANDLE, 0 as LPOVERLAPPED);
@@ -282,6 +287,7 @@ mod platform_impl {
                 // the socket.
                 tracing::debug!("Local IP changed to {:?}", LOCAL_IP.read());
             });
+            Ok(())
         }
     }
 
@@ -292,10 +298,18 @@ mod platform_impl {
 
 #[cfg(not(windows))]
 mod platform_impl {
+    use anyhow::{bail, Result};
     use pnet_transport::TransportReceiver;
     use std::net::Ipv4Addr;
 
-    pub fn prepare_receiver(_tx: &TransportReceiver) {}
+    pub fn prepare_receiver(_tx: &TransportReceiver) -> Result<()> {
+        if let Ok(status) = std::fs::read_to_string("/proc/sys/net/ipv4/icmp_echo_ignore_all") {
+            if status.parse()? != 1 {
+                bail!("sysctl net.ipv4.icmp_echo_ignore_all should be 1 for Ekho to run properly");
+            }
+        }
+        Ok(())
+    }
 
     pub fn filter_local_ip(_addr: Ipv4Addr) -> bool {
         true
