@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
         .nth(1)
         .unwrap_or_else(|| String::from("config.toml"));
 
-    info!("hello!");
+    info!("Ekho (exp. async. impl.) by Chengyuan Ma");
 
     config::load_config_from_file(config_path).await?;
     icmp::init_send_recv_loop().await?;
