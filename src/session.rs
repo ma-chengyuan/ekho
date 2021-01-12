@@ -82,6 +82,7 @@ impl Session {
                 let icmp_tx = crate::icmp::clone_sender().await;
                 let mut local_closing = false;
                 let mut peer_closing = false;
+                let interval = get_config().kcp.interval as u64;
                 'u: while !(kcp.dead_link() || local_closing && peer_closing && kcp.all_flushed()) {
                     select! {
                         _ = sleep_until(next_update) => { /* time for a regular update */ }
@@ -116,9 +117,8 @@ impl Session {
                             }
                         }
                     }
-                    let now = start.elapsed().as_millis() as u32;
-                    kcp.update(now);
-                    next_update = start + Duration::from_millis(kcp.check(now) as u64);
+                    kcp.update(start.elapsed().as_millis() as u32);
+                    next_update = Instant::now() + Duration::from_millis(interval);
                     while let Some(mut raw) = kcp.output() {
                         // dissect_headers_from_raw(&raw, "send");
                         if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
