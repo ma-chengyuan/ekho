@@ -119,6 +119,8 @@ impl Session {
                     }
                     kcp.update(start.elapsed().as_millis() as u32);
                     next_update = Instant::now() + Duration::from_millis(interval);
+                    let span = debug_span!("send ICMP packets");
+                    let _guard = span.enter();
                     while let Some(mut raw) = kcp.output() {
                         // dissect_headers_from_raw(&raw, "send");
                         if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
