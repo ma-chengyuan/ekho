@@ -7,14 +7,24 @@ mod socks5;
 use crate::config::get_config;
 use anyhow::Result;
 use std::env;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{info, Level};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+fn setup_subscriber() -> Result<()> {
+    let fmt_layer = tracing_subscriber::fmt::Layer::default();
+    let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(flame_layer)
+        .init();
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
-        .init();
+    setup_subscriber()?;
 
     let config_path = env::args()
         .nth(1)
@@ -57,4 +67,3 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
-

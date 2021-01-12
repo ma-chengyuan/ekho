@@ -22,7 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 use crate::config::get_config;
 use crate::icmp::IcmpEndpoint;
 
-use crate::kcp::{dissect_headers_from_raw, ControlBlock};
+use crate::kcp::ControlBlock;
 use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
@@ -38,7 +38,7 @@ use tokio::sync::Mutex;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, sleep_until, Duration, Instant};
-use tracing::{debug, error, info};
+use tracing::{debug_span, error, info, Instrument};
 
 lazy_static! {
     static ref RAW_TX: DashMap<(IcmpEndpoint, u32), Sender<Vec<u8>>, BuildHasherDefault<FxHasher>> =
@@ -51,7 +51,6 @@ lazy_static! {
     };
 }
 
-const RAW_CHANNEL_SIZE: usize = 1024;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A session, built on top of KCP
@@ -69,68 +68,72 @@ impl Session {
     pub fn new(peer: IcmpEndpoint, conv: u32) -> Self {
         assert!(!RAW_TX.contains_key(&(peer, conv)));
         // The naming here is very nasty!
-        let (sender, mut send_rx) = channel::<Vec<u8>>(1);
-        let (recv_tx, receiver) = channel(1);
-        let (raw_tx, mut raw_rx) = channel(RAW_CHANNEL_SIZE);
+        let send_wnd = get_config().kcp.send_wnd as usize;
+        let recv_wnd = get_config().kcp.recv_wnd as usize;
+        let (sender, mut send_rx) = channel::<Vec<u8>>(send_wnd);
+        let (recv_tx, receiver) = channel(recv_wnd);
+        let (raw_tx, mut raw_rx) = channel(recv_wnd);
         RAW_TX.insert((peer, conv), raw_tx);
-        let updater = task::spawn(async move {
-            let start = Instant::now();
-            let mut next_update = start;
-            let mut kcp = ControlBlock::new(conv, get_config().kcp.clone());
-            let send_wnd = get_config().kcp.send_wnd as usize;
-            let icmp_tx = crate::icmp::clone_sender().await;
-            let mut local_closing = false;
-            let mut peer_closing = false;
-            'u: while !(kcp.dead_link() || local_closing && peer_closing && kcp.all_flushed()) {
-                select! {
-                    _ = sleep_until(next_update) => { /* time for a regular update */ }
-                    // Interrupted by datagrams sent bu the upper level
-                    res = send_rx.recv(), if kcp.wait_send() < send_wnd => {
-                        match res {
-                            None => break,
-                            Some(data) => {
-                                local_closing |= data.is_empty();
-                                kcp.send(&data).unwrap()
-                            }
-                        }
-                    }
-                    // Interrupted by raw packets received from the lower ICMP level
-                    res = raw_rx.recv() => {
-                        match res {
-                            None => break,
-                            Some(raw) => { kcp.input(&raw).unwrap(); }
-                        }
-                    }
-                    // If we can send packets to be processed by the upper level, send them
-                    res = recv_tx.reserve() => {
-                        match res {
-                            Err(_) => break,
-                            Ok(permit) => {
-                                if let Ok(data) = kcp.recv() {
-                                    peer_closing |= data.is_empty();
-                                    permit.send(data);
+        let updater = task::spawn(
+            async move {
+                let start = Instant::now();
+                let mut next_update = start;
+                let mut kcp = ControlBlock::new(conv, get_config().kcp.clone());
+                let icmp_tx = crate::icmp::clone_sender().await;
+                let mut local_closing = false;
+                let mut peer_closing = false;
+                'u: while !(kcp.dead_link() || local_closing && peer_closing && kcp.all_flushed()) {
+                    select! {
+                        _ = sleep_until(next_update) => { /* time for a regular update */ }
+                        // Interrupted by datagrams sent bu the upper level
+                        res = send_rx.recv(), if kcp.wait_send() < send_wnd => {
+                            match res {
+                                None => break,
+                                Some(data) => {
+                                    local_closing |= data.is_empty();
+                                    kcp.send(&data).unwrap()
                                 }
-                                continue
+                            }
+                        }
+                        // Interrupted by raw packets received from the lower ICMP level
+                        res = raw_rx.recv() => {
+                            match res {
+                                None => break,
+                                Some(raw) => { kcp.input(&raw).unwrap(); }
+                            }
+                        }
+                        // If we can send packets to be processed by the upper level, send them
+                        res = recv_tx.reserve() => {
+                            match res {
+                                Err(_) => break,
+                                Ok(permit) => {
+                                    if let Ok(data) = kcp.recv() {
+                                        peer_closing |= data.is_empty();
+                                        permit.send(data);
+                                    }
+                                    continue
+                                }
                             }
                         }
                     }
-                }
-                let now = start.elapsed().as_millis() as u32;
-                kcp.update(now);
-                next_update = start + Duration::from_millis(kcp.check(now) as u64);
-                while let Some(mut raw) = kcp.output() {
-                    // dissect_headers_from_raw(&raw, "send");
-                    if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
-                        // ICMP receiver (CHANNEL.1 in crate::icmp) never closes, so unwrapping is
-                        // safe here.
-                        icmp_tx.send((peer, raw)).unwrap();
-                    } else {
-                        error!("error encrypting block");
-                        break 'u;
+                    let now = start.elapsed().as_millis() as u32;
+                    kcp.update(now);
+                    next_update = start + Duration::from_millis(kcp.check(now) as u64);
+                    while let Some(mut raw) = kcp.output() {
+                        // dissect_headers_from_raw(&raw, "send");
+                        if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
+                            // ICMP receiver (CHANNEL.1 in crate::icmp) never closes, so unwrapping is
+                            // safe here.
+                            icmp_tx.send((peer, raw)).unwrap();
+                        } else {
+                            error!("error encrypting block");
+                            break 'u;
+                        }
                     }
                 }
             }
-        });
+            .instrument(debug_span!("scheduler")),
+        );
         Session {
             sender,
             receiver,
@@ -177,7 +180,11 @@ async fn recv_loop() {
             INCOMING.0.send(new_session).unwrap_or_default();
         }
         if let Some(raw_tx) = RAW_TX.get(key) {
-            if let Err(_err) = raw_tx.send(raw).await {
+            if let Err(_err) = raw_tx
+                .send(raw)
+                .instrument(debug_span!("raw_tx send"))
+                .await
+            {
                 error!(
                     "error feeding raw packets to {}:{}@{}",
                     from.ip, from.id, conv

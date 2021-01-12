@@ -35,6 +35,7 @@ use std::cmp::{max, min, Ordering};
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::TryInto;
 use thiserror::Error;
+use tracing::instrument;
 
 /// KCP error type.
 #[derive(Debug, Error)]
@@ -145,7 +146,7 @@ impl Default for Config {
 }
 
 /// KCP Data Segment
-#[derive(Default)]
+#[derive(Debug, Default)]
 #[rustfmt::skip]
 struct Segment {
     frg: u8, ts: u32, sn: u32,
@@ -168,6 +169,7 @@ struct Segment {
 /// KCP control block with BBR congestion control.
 ///
 /// This control block is **NOT** safe for concurrent access -- to do so please wrap it in a Mutex.
+#[derive(Debug)]
 pub struct ControlBlock {
     /// Conversation ID.
     conv: u32,
@@ -320,6 +322,7 @@ impl ControlBlock {
     /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one receive
     /// corresponds to one [send](#method.send) on the other side. Otherwise, this correlation
     /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
+    #[instrument]
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         let size = self.peek_size()?;
         let mut ret = Vec::with_capacity(size);
@@ -342,6 +345,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
+    #[instrument]
     pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
         let mss = self.config.mss();
         if self.config.stream {
@@ -567,6 +571,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
+    #[instrument]
     pub fn input(&mut self, mut data: &[u8]) -> Result<usize> {
         let prev_len = data.len();
         let mut has_ack = false;
@@ -812,6 +817,7 @@ impl ControlBlock {
     /// Flushes packets from the [send queue](#structfield.send_queue) to the
     /// [send buffer](#structfield.send_buf), and (re)transmits the packets in the send buffer
     /// if necessary.
+    #[instrument]
     fn flush(&mut self) {
         if !self.updated {
             return;
@@ -827,6 +833,7 @@ impl ControlBlock {
     }
 
     /// Sets the internal time to `current` and then updates the whole control block.
+    #[instrument]
     pub fn update(&mut self, now: u32) {
         self.now = now;
         if !self.updated {
