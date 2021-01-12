@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
     if get_config().remote.is_none() {
         let mut session = session::Session::incoming().await;
         info!("received session: {}", session);
+        session.receiver.recv().await.unwrap();
         session.sender.send(vec![1, 1, 4, 5, 1, 4]).await.unwrap();
         info!("data sent");
         session.close().await;
