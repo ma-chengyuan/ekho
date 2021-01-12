@@ -172,6 +172,7 @@ mod platform_impl {
     use std::mem::{size_of, zeroed};
     use std::net::Ipv4Addr;
     use std::thread;
+    use tracing::debug;
     use winapi::ctypes::c_int;
     use winapi::shared::ifdef::IF_INDEX;
     use winapi::shared::ipmib::{
@@ -186,7 +187,6 @@ mod platform_impl {
     use winapi::um::iphlpapi::{GetIpAddrTable, GetIpForwardTable, NotifyAddrChange};
     use winapi::um::minwinbase::LPOVERLAPPED;
     use winapi::um::winsock2::{bind, inet_addr, ntohs, WSAIoctl, SOCKET, SOCKET_ERROR};
-    use tracing::debug;
 
     lazy_static! {
         static ref LOCAL_INTERFACE: Option<IF_INDEX> = unsafe { guess_local_interface() };

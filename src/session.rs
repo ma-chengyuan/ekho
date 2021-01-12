@@ -38,7 +38,7 @@ use tokio::sync::Mutex;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, sleep_until, Duration, Instant};
-use tracing::{info, error, debug};
+use tracing::{debug, error, info};
 
 lazy_static! {
     static ref RAW_TX: DashMap<(IcmpEndpoint, u32), Sender<Vec<u8>>, BuildHasherDefault<FxHasher>> =
@@ -173,9 +173,7 @@ async fn recv_loop() {
             if let Err(_err) = raw_tx.send(raw).await {
                 error!(
                     "error feeding raw packets to {}:{}@{}",
-                    from.ip,
-                    from.id,
-                    conv
+                    from.ip, from.id, conv
                 );
             }
         }

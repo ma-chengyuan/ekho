@@ -41,7 +41,7 @@ use thiserror::Error;
 pub enum Error {
     #[error("packet to be sent too large to be fragmented")]
     OversizePacket,
-    #[error("invalid KCP packet")]
+    #[error("incomplete KCP packet")]
     IncompletePacket,
     #[error("invalid KCP command: {0}")]
     InvalidCommand(u8),
@@ -141,14 +141,12 @@ impl Default for Config {
     }
 }
 
+/// KCP Data Segment
 #[derive(Default)]
 #[rustfmt::skip]
 struct Segment {
-    // Header layout
-    #[doc = "Conversation ID."]     conv: u32,  #[doc = "KCP command."]         cmd: Command,
-    #[doc = "Fragmentation."]       frg: u8,    #[doc = "Remote window size."]  wnd: u16,
-    #[doc = "Timestamp when sent."] ts: u32,    #[doc = "Sequence number."]     sn: u32,
-    #[doc = "UNA when sent."]       una: u32,
+    frg: u8, ts: u32, sn: u32,
+    /// Time for next retransmission
     ts_rexmit: u32,
     rto: u32,
     /// Number of times the packet is skip-ACKed.
@@ -172,6 +170,7 @@ pub struct ControlBlock {
     conv: u32,
     /// KCP Config (should be immutable)
     config: Config,
+    /// If the underlying link is dead
     dead_link: bool,
     /// Oldest Unacknowledged Packet in the send window.
     send_una: u32,
@@ -188,7 +187,7 @@ pub struct ControlBlock {
     /// Remote window size (packet).
     rmt_wnd: u16,
     /// Current timestamp (ms).
-    current: u32,
+    now: u32,
     /// Whether the control block is updated at least once.
     updated: bool,
     /// Timestamp for next flush.
@@ -266,7 +265,7 @@ impl ControlBlock {
             rtt_var: 0,
             srtt: 0,
             rmt_wnd: config.recv_wnd,
-            current: 0,
+            now: 0,
             ts_flush: config.interval,
             ts_probe: 0,
             probe_ask: false,
@@ -409,7 +408,7 @@ impl ControlBlock {
     /// the `onAck` function in the BBR paper.
     fn update_bbr_on_ack(&mut self, seg: &Segment) {
         self.delivered += seg.payload.len() + OVERHEAD as usize;
-        self.ts_last_ack = self.current;
+        self.ts_last_ack = self.now;
         self.inflight = self
             .inflight
             .saturating_sub(seg.payload.len() + OVERHEAD as usize);
@@ -419,8 +418,8 @@ impl ControlBlock {
         // xmits == 1 is necessary. If a packet is transmitted multiple times, and we receive an
         // UNA packet prior to the ACK packet, there is no way we can possibly know which
         // (re)transmission it was that reached the other side.
-        if self.current >= seg.ts && seg.xmits == 1 {
-            let rtt = max(self.current - seg.ts, 1);
+        if self.now >= seg.ts && seg.xmits == 1 {
+            let rtt = max(self.now - seg.ts, 1);
             self.update_rtt_filters(rtt);
             while self
                 .rt_prop_queue
@@ -430,12 +429,12 @@ impl ControlBlock {
             {
                 self.rt_prop_queue.pop_back().unwrap();
             }
-            self.rt_prop_queue.push_back((self.current, rtt));
+            self.rt_prop_queue.push_back((self.now, rtt));
             if self.rt_prop_expired {
                 while self
                     .rt_prop_queue
                     .front()
-                    .map(|p| p.0 + self.config.rt_prop_wnd <= self.current)
+                    .map(|p| p.0 + self.config.rt_prop_wnd <= self.now)
                     .unwrap_or(false)
                 {
                     self.rt_prop_queue.pop_front().unwrap();
@@ -449,7 +448,7 @@ impl ControlBlock {
                 while self
                     .btl_bw_queue
                     .front()
-                    .map(|p| p.0 + self.config.btl_bw_wnd * self.srtt <= self.current)
+                    .map(|p| p.0 + self.config.btl_bw_wnd * self.srtt <= self.now)
                     .unwrap_or(false)
                 {
                     self.btl_bw_queue.pop_front().unwrap();
@@ -462,7 +461,7 @@ impl ControlBlock {
                 {
                     self.btl_bw_queue.pop_back().unwrap();
                 }
-                self.btl_bw_queue.push_back((self.current, btl_bw));
+                self.btl_bw_queue.push_back((self.now, btl_bw));
             }
         }
     }
@@ -475,7 +474,7 @@ impl ControlBlock {
         }
         if let BBRState::Startup = self.bbr_state {
             if !self.btl_bw_queue.is_empty()
-                && self.btl_bw_queue.front().unwrap().0 + 3 * self.srtt <= self.current
+                && self.btl_bw_queue.front().unwrap().0 + 3 * self.srtt <= self.now
             {
                 // Bottle neck bandwidth has not been updated in 3 RTTs, indicating that the pipe
                 // is filled and we have probe the bandwidth, enter drain
@@ -485,23 +484,23 @@ impl ControlBlock {
             if self.inflight <= self.bdp() {
                 let phase: usize = thread_rng().gen_range(0, 7);
                 self.bbr_state =
-                    BBRState::ProbeBW(self.current, if phase >= 1 { phase + 1 } else { phase });
+                    BBRState::ProbeBW(self.now, if phase >= 1 { phase + 1 } else { phase });
             }
         } else if let BBRState::ProbeBW(since, phase) = self.bbr_state {
             let last_rt_prop_update = self.rt_prop_queue.front().unwrap().0;
-            if last_rt_prop_update + self.config.rt_prop_wnd <= self.current
+            if last_rt_prop_update + self.config.rt_prop_wnd <= self.now
                 && !self.rt_prop_expired
             {
-                self.bbr_state = BBRState::ProbeRTT(self.current, phase);
+                self.bbr_state = BBRState::ProbeRTT(self.now, phase);
                 self.rt_prop_expired = true;
-            } else if since + self.srtt <= self.current {
+            } else if since + self.srtt <= self.now {
                 // Each gain cycle phase lasts for one RTT
                 self.bbr_state =
-                    BBRState::ProbeBW(self.current, (phase + 1) % BBR_GAIN_CYCLE.len());
+                    BBRState::ProbeBW(self.now, (phase + 1) % BBR_GAIN_CYCLE.len());
             }
         } else if let BBRState::ProbeRTT(since, phase) = self.bbr_state {
-            if since + self.config.probe_rtt_time <= self.current {
-                self.bbr_state = BBRState::ProbeBW(self.current, phase);
+            if since + self.config.probe_rtt_time <= self.now {
+                self.bbr_state = BBRState::ProbeBW(self.now, phase);
             }
         }
     }
@@ -509,18 +508,17 @@ impl ControlBlock {
     /// Removes the packet from the [send buffer](#structfield.send_buf) whose sequence number is `sn`
     /// marks it as acknowledged.
     fn ack_packet_with_sn(&mut self, sn: u32) {
-        tracing::debug!("ack sn {} {} {}", sn, self.send_una, self.send_nxt);
-        if sn < self.send_una || sn >= self.send_nxt {
-            return;
-        }
-        for i in 0..self.send_buf.len() {
-            match sn.cmp(&self.send_buf[i].sn) {
-                Ordering::Less => break,
-                Ordering::Greater => continue,
-                Ordering::Equal => {
-                    let seg = self.send_buf.remove(i).unwrap();
-                    self.update_bbr_on_ack(&seg);
-                    break;
+        // tracing::debug!("ack sn {} {} {}", sn, self.send_una, self.send_nxt);
+        if self.send_una <= sn && sn < self.send_nxt {
+            for i in 0..self.send_buf.len() {
+                match sn.cmp(&self.send_buf[i].sn) {
+                    Ordering::Less => break,
+                    Ordering::Greater => continue,
+                    Ordering::Equal => {
+                        let seg = self.send_buf.remove(i).unwrap();
+                        self.update_bbr_on_ack(&seg);
+                        break;
+                    }
                 }
             }
         }
@@ -531,7 +529,7 @@ impl ControlBlock {
     fn ack_packets_before_una(&mut self, una: u32) {
         while !self.send_buf.is_empty() && self.send_buf[0].sn < una {
             let seg = self.send_buf.pop_front().unwrap();
-            tracing::debug!("ack una {} < {}", seg.sn, una);
+            // tracing::debug!("ack una {} < {}", seg.sn, una);
             self.update_bbr_on_ack(&seg);
         }
     }
@@ -667,13 +665,13 @@ impl ControlBlock {
             if self.probe_timeout == 0 {
                 // If we are not probing, start probing window size
                 self.probe_timeout = self.config.probe_min;
-                self.ts_probe = self.current + self.probe_timeout;
-            } else if self.current >= self.ts_probe {
+                self.ts_probe = self.now + self.probe_timeout;
+            } else if self.now >= self.ts_probe {
                 // Increase probe timeout by 1.5x until we know the window size
                 self.probe_timeout = max(self.probe_timeout, self.config.probe_min);
                 self.probe_timeout += self.probe_timeout / 2;
                 self.probe_timeout = min(self.probe_timeout, self.config.probe_max);
-                self.ts_probe = self.current + self.probe_timeout;
+                self.ts_probe = self.now + self.probe_timeout;
                 self.probe_ask = true;
             }
         } else {
@@ -682,58 +680,57 @@ impl ControlBlock {
         }
     }
 
-    fn flush_segment(&mut self) {}
-
-    /// Flushes packets from the [send queue](#structfield.send_queue) to the
-    /// [send buffer](#structfield.send_buf), and (re)transmits the packets in the send buffer
-    /// if necessary.
-    fn flush(&mut self) {
-        if !self.updated {
-            return;
-        }
-
+    fn flush_segment(&mut self, cmd: Command, frg: u8, sn: u32, ts: u32, len: usize) {
         let wnd = self
             .config
             .recv_wnd
             .saturating_sub(self.recv_queue.len() as u16);
-        let mut seg = Segment {
-            conv: self.conv,
-            cmd: Command::Ack,
-            una: self.recv_nxt,
-            wnd,
-            ..Default::default()
-        };
+        if self.buffer.len() + len + OVERHEAD as usize > self.config.mtu as usize {
+            let mut new_buf = Vec::with_capacity(self.config.mtu as usize);
+            std::mem::swap(&mut self.buffer, &mut new_buf);
+            self.output.push_back(new_buf);
+        }
+        self.buffer.put_u32_le(self.conv);
+        self.buffer.put_u8(cmd.into());
+        self.buffer.put_u8(frg);
+        self.buffer.put_u16_le(wnd);
+        self.buffer.put_u32_le(ts);
+        self.buffer.put_u32_le(sn);
+        self.buffer.put_u32_le(self.recv_nxt);
+        self.buffer.put_u32_le(len as u32);
+    }
 
+    /// Flush all pending ACKs
+    fn flush_ack(&mut self) {
         let mut old_ack_list = Vec::new();
         std::mem::swap(&mut self.ack_pending, &mut old_ack_list);
         for (sn, ts) in old_ack_list {
-            seg.sn = sn;
-            seg.ts = ts;
-            flush_segment(&mut self.buffer, &mut self.output, self.config.mtu, &seg);
-            tracing::debug!("ack sent {}", sn);
+            self.flush_segment(Command::Ack, 0, sn, ts, 0);
+            // tracing::debug!("ack sent {}", sn);
         }
-        seg.sn = 0;
-        seg.ts = 0;
+    }
 
+    /// Flush all window-probing-related segments
+    fn flush_probe(&mut self) {
         self.update_probe();
-
         if self.probe_ask {
-            seg.cmd = Command::AskWnd;
-            flush_segment(&mut self.buffer, &mut self.output, self.config.mtu, &seg);
+            self.flush_segment(Command::AskWnd, 0, 0, 0, 0);
             self.probe_ask = false;
         }
         if self.probe_tell {
-            seg.cmd = Command::TellWnd;
-            flush_segment(&mut self.buffer, &mut self.output, self.config.mtu, &seg);
+            self.flush_segment(Command::TellWnd, 0, 0, 0, 0);
             self.probe_tell = false;
         }
+    }
 
-        self.update_bbr_state();
+    /// Calculate the congestion limit based on BBR.
+    fn calc_bbr_limit(&mut self) -> usize {
         // Because we are not really pacing the packets, the sending logic is different from what
         // is stated in the original BBR paper. The original BBR uses two parameters: cwnd_gain
         // and pacing_gain. However, the effects of the two parameters are hard to distinguish when
         // packets are flushed. Thus, it may be better to merge the two parameters into one here.
-        let limit = if self.config.bbr {
+        if self.config.bbr {
+            self.update_bbr_state();
             let limit = match self.bbr_state {
                 BBRState::Startup => self.bdp() * 2955 / 1024, /* 2 / ln2 */
                 // ln2 / 2 is the value of pacing_gain. Given the current state machine logic in
@@ -747,115 +744,103 @@ impl ControlBlock {
             limit * self.bdp_gain / BDP_GAIN_DEN
         } else {
             usize::max_value()
-        };
+        }
+    }
 
-        // Move segments from the send queue to the send buffer
+    /// Prepare a segment for (re)transmission
+    fn prepare_xmit(&self, seg: &mut Segment) -> bool {
+        if seg.xmits == 0 {
+            seg.rto = self.rto;
+            seg.ts_rexmit = self.now + seg.rto;
+            if !self.config.nodelay {
+                seg.ts_rexmit += self.config.rto_min;
+            }
+            return true;
+        } else if self.now >= seg.ts_rexmit {
+            // Regular retransmission
+            seg.rto = if self.config.nodelay {
+                max(seg.rto, self.rto)
+            } else {
+                // Increase RTO by 1.5x, better than 2x in TCP
+                seg.rto + seg.rto / 2
+            };
+            seg.ts_rexmit = self.now + seg.rto;
+            return true;
+        } else if self.config.fast_rexmit_thres != 0
+            && seg.skip_acks >= self.config.fast_rexmit_thres
+            && (seg.xmits <= self.config.fast_rexmit_limit || self.config.fast_rexmit_limit == 0)
+        {
+            // Fast retransmission
+            seg.skip_acks = 0;
+            seg.ts_rexmit = self.now + seg.rto;
+            return true;
+        }
+        false
+    }
+
+    fn flush_push(&mut self) {
+        let limit = self.calc_bbr_limit();
         let cwnd = min(self.config.send_wnd, self.rmt_wnd);
         while self.send_nxt < self.send_una + cwnd as u32
             && !self.send_queue.is_empty()
             && self.inflight <= limit
         {
             let mut seg = self.send_queue.pop_front().unwrap();
-            seg.conv = self.conv;
-            seg.cmd = Command::Push;
             seg.sn = self.send_nxt;
             self.send_nxt += 1;
-            seg.app_limited = self.app_limited_until > 0;
             self.inflight += seg.payload.len() + OVERHEAD as usize;
             self.send_buf.push_back(seg);
             if self.inflight <= limit && self.send_queue.is_empty() {
                 self.app_limited_until = self.inflight;
             }
         }
-
-        let rto_min = if self.config.nodelay {
-            0
-        } else {
-            self.config.rto_min
-        };
-
         // (Re)transmit segments in the send buffer
-        for i in 0..self.send_buf.len() {
-            let seg = &mut self.send_buf[i];
-            let mut xmit = false;
-            if seg.xmits == 0 {
-                xmit = true;
-                seg.rto = self.rto;
-                seg.ts_rexmit = self.current + seg.rto + rto_min;
-            } else if self.current >= seg.ts_rexmit {
-                // Regular retransmission
-                xmit = true;
-                seg.rto = if self.config.nodelay {
-                    max(seg.rto, self.rto)
-                } else {
-                    // Increase RTO by 1.5x, better than 2x in TCP
-                    seg.rto + seg.rto / 2
-                };
-                seg.ts_rexmit = self.current + seg.rto;
-            } else if self.config.fast_rexmit_thres != 0
-                && seg.skip_acks >= self.config.fast_rexmit_thres
-                && (seg.xmits <= self.config.fast_rexmit_limit
-                    || self.config.fast_rexmit_limit == 0)
-            {
-                // Fast retransmission
-                xmit = true;
-                seg.skip_acks = 0;
-                seg.ts_rexmit = self.current + seg.rto;
-            }
-
-            if xmit {
+        // Use mem::take to work around the rust borrow checker since it does not yet support
+        // partial-borrowing
+        let mut send_buf = std::mem::take(&mut self.send_buf);
+        for seg in send_buf.iter_mut() {
+            if self.prepare_xmit(seg) {
                 seg.xmits += 1;
-                seg.ts = self.current;
-                seg.wnd = wnd;
-                seg.una = self.recv_nxt;
-
+                seg.ts = self.now;
                 seg.delivered = self.delivered;
                 seg.ts_last_ack = self.ts_last_ack;
-                flush_segment(&mut self.buffer, &mut self.output, self.config.mtu, &seg);
+                seg.app_limited = self.app_limited_until > 0;
                 self.dead_link |= seg.xmits >= self.config.dead_link_thres;
+                self.flush_segment(Command::Push, seg.frg, seg.sn, seg.ts, seg.payload.len());
+                self.buffer.extend_from_slice(&seg.payload);
             }
         }
+        self.send_buf = send_buf;
+    }
 
+    /// Flushes packets from the [send queue](#structfield.send_queue) to the
+    /// [send buffer](#structfield.send_buf), and (re)transmits the packets in the send buffer
+    /// if necessary.
+    fn flush(&mut self) {
+        if !self.updated {
+            return;
+        }
+        self.flush_ack();
+        self.flush_probe();
+        self.flush_push();
         if !self.buffer.is_empty() {
             let mut new_buf = Vec::with_capacity(self.config.mtu as usize);
             std::mem::swap(&mut self.buffer, &mut new_buf);
             self.output.push_back(new_buf);
         }
-
-        fn flush_segment(
-            buf: &mut Vec<u8>,
-            output: &mut VecDeque<Vec<u8>>,
-            mtu: u32,
-            seg: &Segment,
-        ) {
-            if buf.len() + seg.payload.len() + OVERHEAD as usize > mtu as usize {
-                let mut new_buf = Vec::with_capacity(mtu as usize);
-                std::mem::swap(buf, &mut new_buf);
-                output.push_back(new_buf);
-            }
-            buf.put_u32_le(seg.conv);
-            buf.put_u8(seg.cmd.into());
-            buf.put_u8(seg.frg);
-            buf.put_u16_le(seg.wnd);
-            buf.put_u32_le(seg.ts);
-            buf.put_u32_le(seg.sn);
-            buf.put_u32_le(seg.una);
-            buf.put_u32_le(seg.payload.len() as u32);
-            buf.extend_from_slice(&seg.payload);
-        }
     }
 
     /// Sets the internal time to `current` and then updates the whole control block.
-    pub fn update(&mut self, current: u32) {
-        self.current = current;
+    pub fn update(&mut self, now: u32) {
+        self.now = now;
         if !self.updated {
             self.updated = true;
-            self.ts_flush = current;
+            self.ts_flush = now;
         }
-        if self.ts_flush <= current {
+        if self.ts_flush <= now {
             self.ts_flush += self.config.interval;
-            if self.current >= self.ts_flush {
-                self.ts_flush = self.current + self.config.interval;
+            if self.now >= self.ts_flush {
+                self.ts_flush = self.now + self.config.interval;
             }
             self.flush();
         }
@@ -863,17 +848,17 @@ impl ControlBlock {
 
     /// Checks the next time you should call [update](#method.update) assuming current time is
     /// `current`.
-    pub fn check(&self, current: u32) -> u32 {
+    pub fn check(&self, now: u32) -> u32 {
         if !self.updated {
-            return current;
+            return now;
         }
-        if self.ts_flush <= current {
-            return current;
+        if self.ts_flush <= now {
+            return now;
         }
-        let mut next_update = min(current + self.config.interval, self.ts_flush);
+        let mut next_update = min(now + self.config.interval, self.ts_flush);
         for seg in &self.send_buf {
-            if seg.ts_rexmit <= current {
-                return current;
+            if seg.ts_rexmit <= now {
+                return now;
             }
             next_update = min(next_update, seg.ts_rexmit);
         }
