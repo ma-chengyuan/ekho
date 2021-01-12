@@ -831,7 +831,7 @@ impl ControlBlock {
         }
         if self.ts_flush <= now {
             self.ts_flush += self.config.interval;
-            if self.now >= self.ts_flush {
+            if self.ts_flush <= now {
                 self.ts_flush = self.now + self.config.interval;
             }
             self.flush();

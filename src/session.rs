@@ -101,10 +101,23 @@ impl Session {
                             Some(raw) => { kcp.input(&raw).unwrap(); }
                         }
                     }
+                    // If we can send packets to be processed by the upper level, send them
+                    res = recv_tx.reserve() => {
+                        match res {
+                            Err(_) => break,
+                            Ok(permit) => {
+                                if let Ok(data) = kcp.recv() {
+                                    peer_closing |= data.is_empty();
+                                    permit.send(data);
+                                }
+                                continue
+                            }
+                        }
+                    }
                 }
-                let current = start.elapsed().as_millis() as u32;
-                kcp.update(current);
-                next_update = start + Duration::from_millis(kcp.check(current) as u64);
+                let now = start.elapsed().as_millis() as u32;
+                kcp.update(now);
+                next_update = start + Duration::from_millis(kcp.check(now) as u64);
                 while let Some(mut raw) = kcp.output() {
                     dissect_headers_from_raw(&raw, "send");
                     if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
@@ -113,14 +126,6 @@ impl Session {
                         icmp_tx.send((peer, raw)).unwrap();
                     } else {
                         error!("error encrypting block");
-                        break 'u;
-                    }
-                }
-                while let Ok(data) = kcp.recv() {
-                    peer_closing |= data.is_empty();
-                    // Break immediately regardless of unsent segments because the peer intends
-                    // to close the session
-                    if recv_tx.send(data).await.is_err() {
                         break 'u;
                     }
                 }
