@@ -106,6 +106,9 @@ pub struct Config {
     pub btl_bw_wnd: u32,
     /// Time for one ProbeRTT phase.
     pub probe_rtt_time: u32,
+    /// A multiplier than controls the aggressiveness of BBR. To avoid floating point arithmetic
+    /// it is 1024-based e.g. set to 1024 for 1.0, 1536 for 1.5, and 2048 for 2.0 etc.
+    pub bdp_gain: usize,
 }
 
 impl Config {
@@ -136,6 +139,7 @@ impl Default for Config {
             rt_prop_wnd: 10000,
             btl_bw_wnd: 10,
             probe_rtt_time: 200,
+            bdp_gain: 1536,
         }
     }
 }
@@ -215,8 +219,6 @@ pub struct ControlBlock {
     /// Buffer used to merge small packets into a batch (thus making better use of bandwidth).
     buffer: Vec<u8>,
 
-    /// Controls how aggressively BBR controls the send window
-    bdp_gain: usize,
     /// Time of receiving the last ACK packet.
     ts_last_ack: u32,
     /// Bytes confirmed to have been delivered.
@@ -279,7 +281,6 @@ impl ControlBlock {
             output: Default::default(),
             buffer: Vec::with_capacity(config.mtu as usize),
 
-            bdp_gain: 1024,
             delivered: 0,
             ts_last_ack: 0,
             inflight: 0,
@@ -736,7 +737,7 @@ impl ControlBlock {
             };
             // Empirical tests have found the current limit to be a bit conservative. One solution
             // might be to multiply the current limit with a small, configurable gain.
-            limit * self.bdp_gain / BDP_GAIN_DEN
+            limit * self.config.bdp_gain / BDP_GAIN_DEN
         } else {
             usize::max_value()
         }
