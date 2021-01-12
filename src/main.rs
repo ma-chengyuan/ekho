@@ -8,6 +8,7 @@ use crate::config::get_config;
 use anyhow::Result;
 use std::env;
 use tracing::{info, Level};
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,18 +28,30 @@ async fn main() -> Result<()> {
 
     if get_config().remote.is_none() {
         let mut session = session::Session::incoming().await;
-        info!("received session: {}", session);
         session.receiver.recv().await.unwrap();
-        session.sender.send(vec![1, 1, 4, 5, 1, 4]).await.unwrap();
-        info!("data sent");
+        info!("received session: {}", session);
+        let mut file = tokio::fs::File::create("sample").await?;
+        loop {
+            let data = session.receiver.recv().await.unwrap();
+            if data.is_empty() {
+                break;
+            }
+            file.write_all(&data).await?;
+        }
         session.close().await;
         info!("closed");
     // server::test_file_upload();
     } else {
         let mut session = session::Session::new(get_config().remote.unwrap(), 998244353);
-        session.sender.send(vec![1]).await.unwrap();
-        let res = session.receiver.recv().await.unwrap();
-        info!("received: {:?}", res);
+        let mut file = tokio::fs::File::open("sample").await?;
+        let mut buf = vec![0u8; get_config().kcp.mss()];
+        loop {
+            let len = file.read(&mut buf).await?;
+            if len == 0 {
+                break;
+            }
+            session.sender.send(Vec::from(&buf[..len])).await?;
+        }
         session.close().await;
         info!("closed");
         // client::test_file_download();

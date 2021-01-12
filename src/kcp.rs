@@ -108,6 +108,12 @@ pub struct Config {
     pub probe_rtt_time: u32,
 }
 
+impl Config {
+    pub fn mss(&self) -> usize {
+        (self.mtu - OVERHEAD) as usize
+    }
+}
+
 /// Gives a decent default configuration suitable for most use cases
 impl Default for Config {
     fn default() -> Self {
@@ -336,7 +342,7 @@ impl ControlBlock {
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
     pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
-        let mss = (self.config.mtu - OVERHEAD) as usize;
+        let mss = self.config.mss();
         if self.config.stream {
             if let Some(old) = self.send_queue.back_mut() {
                 if old.payload.len() < mss {
@@ -481,15 +487,12 @@ impl ControlBlock {
             }
         } else if let BBRState::ProbeBW(since, phase) = self.bbr_state {
             let last_rt_prop_update = self.rt_prop_queue.front().unwrap().0;
-            if last_rt_prop_update + self.config.rt_prop_wnd <= self.now
-                && !self.rt_prop_expired
-            {
+            if last_rt_prop_update + self.config.rt_prop_wnd <= self.now && !self.rt_prop_expired {
                 self.bbr_state = BBRState::ProbeRTT(self.now, phase);
                 self.rt_prop_expired = true;
             } else if since + self.srtt <= self.now {
                 // Each gain cycle phase lasts for one RTT
-                self.bbr_state =
-                    BBRState::ProbeBW(self.now, (phase + 1) % BBR_GAIN_CYCLE.len());
+                self.bbr_state = BBRState::ProbeBW(self.now, (phase + 1) % BBR_GAIN_CYCLE.len());
             }
         } else if let BBRState::ProbeRTT(since, phase) = self.bbr_state {
             if since + self.config.probe_rtt_time <= self.now {
