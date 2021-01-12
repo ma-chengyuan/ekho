@@ -22,7 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 use crate::config::get_config;
 use crate::icmp::IcmpEndpoint;
 
-use crate::kcp::ControlBlock;
+use crate::kcp::{ControlBlock, dissect_headers_from_raw};
 use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
@@ -106,6 +106,7 @@ impl Session {
                 kcp.update(current);
                 next_update = start + Duration::from_millis(kcp.check(current) as u64);
                 while let Some(mut raw) = kcp.output() {
+                    dissect_headers_from_raw(&raw, "send");
                     if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
                         // ICMP receiver (CHANNEL.1 in crate::icmp) never closes, so unwrapping is
                         // safe here.
@@ -164,6 +165,7 @@ async fn recv_loop() {
         }
         let conv = crate::kcp::conv_from_raw(&raw);
         let key = &(from, conv);
+        dissect_headers_from_raw(&raw, "recv");
         if !RAW_TX.contains_key(key) && crate::kcp::first_push_packet(&raw) {
             // The receiver of INCOMING obviously never closes, so unwrapping is safe here
             let new_session = Session::new(from, conv);

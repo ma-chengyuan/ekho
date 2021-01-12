@@ -63,20 +63,13 @@ const BBR_GAIN_CYCLE: [usize; 8] = [5, 3, 4, 4, 4, 4, 4, 4];
 /// KCP BDP gain denominator
 const BDP_GAIN_DEN: usize = 1024;
 
-#[derive(Clone, Copy, TryFromPrimitive, IntoPrimitive)]
+#[derive(Debug, Clone, Copy, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 enum Command {
     Push = 81,
     Ack = 82,
     AskWnd = 83,
     TellWnd = 84,
-}
-
-// Dummy impl. Actually useless
-impl Default for Command {
-    fn default() -> Self {
-        Command::Ack
-    }
 }
 
 /// KCP configuration.
@@ -610,7 +603,6 @@ impl ControlBlock {
             self.update_una();
             match cmd {
                 Command::Ack => {
-                    tracing::debug!("ack received {}", sn);
                     self.ack_packet_with_sn(sn);
                     self.update_una();
                     if !has_ack || sn > sn_max_ack {
@@ -927,7 +919,7 @@ pub fn first_push_packet(mut buf: &[u8]) -> bool {
 }
 
 /// Print the headers of the packets in the given raw buffer `buf` using `log::debug!(...)`
-pub fn dissect_headers_from_raw(mut buf: &[u8]) {
+pub fn dissect_headers_from_raw(mut buf: &[u8], prefix: &'static str) {
     while buf.len() >= OVERHEAD as usize {
         let _conv = buf.get_u32_le();
         let cmd = buf.get_u8();
@@ -939,8 +931,8 @@ pub fn dissect_headers_from_raw(mut buf: &[u8]) {
         let len = buf.get_u32_le() as usize;
         #[rustfmt::skip]
         tracing::debug!(
-            "{:?}\tfrg\t{}\twnd\t{}\tts\t{}\tsn\t{}\tuna\t{}\tlen\t{}",
-            cmd, frg, wnd, ts, sn, una, len
+            "{} {:?}\t\tfrg {:3} wnd {:5} ts {:6} sn {:6} una {:6} len {:8}",
+            prefix, Command::try_from_primitive(cmd).unwrap(), frg, wnd, ts, sn, una, len
         );
         buf = &buf[len..];
     }
