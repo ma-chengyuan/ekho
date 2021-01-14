@@ -41,7 +41,7 @@ use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
-use tracing::{debug_span, error, info, Instrument};
+use tracing::{debug_span, error, info, instrument, Instrument};
 
 type Control = (Mutex<ControlBlock>, Notify);
 
@@ -110,7 +110,9 @@ impl Session {
                             break;
                         }
                     }
-                    sleep(interval).await;
+                    sleep(interval)
+                        .instrument(debug_span!("kcp update interval"))
+                        .await;
                 }
             }
             .instrument(debug_span!("update_loop")),
@@ -129,6 +131,7 @@ impl Session {
         INCOMING.1.lock().await.recv().await.unwrap()
     }
 
+    #[instrument]
     pub async fn send(&self, buf: &[u8]) {
         loop {
             {
@@ -145,6 +148,7 @@ impl Session {
         }
     }
 
+    #[instrument]
     pub async fn recv(&self) -> Vec<u8> {
         loop {
             {
@@ -178,15 +182,18 @@ impl Session {
     }
 }
 
-impl fmt::Display for Session {
+impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}@{}", self.peer, self.conv)
     }
 }
 
+#[instrument]
 async fn recv_loop() {
     loop {
-        let (from, mut raw) = crate::icmp::receive_packet().await;
+        let (from, mut raw) = crate::icmp::receive_packet()
+            .instrument(debug_span!("receive_icmp_packet"))
+            .await;
         if CIPHER.decrypt_in_place(&NONCE, b"", &mut raw).is_err() {
             // TODO: mimic normal ping behavior
             continue;

@@ -40,6 +40,7 @@ use std::convert::TryInto;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use timer::Timer;
+use tracing::{debug, instrument};
 use window::Window;
 
 /// KCP error type.
@@ -174,6 +175,7 @@ struct Segment {
 /// KCP control block with BBR congestion control.
 ///
 /// This control block is **NOT** safe for concurrent access -- to do so please wrap it in a Mutex.
+#[derive(Debug)]
 pub struct ControlBlock {
     /// Conversation ID.
     conv: u32,
@@ -326,6 +328,7 @@ impl ControlBlock {
     /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one receive
     /// corresponds to one [send](#method.send) on the other side. Otherwise, this correlation
     /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
+    #[instrument]
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         let size = self.peek_size()?;
         let mut ret = Vec::with_capacity(size);
@@ -348,6 +351,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
+    #[instrument]
     pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
         let mss = self.config.mss();
         if self.config.stream {
@@ -751,8 +755,10 @@ impl ControlBlock {
         }
     }
 
+    #[instrument]
     fn flush_push(&mut self) {
         let limit = self.calc_bbr_limit();
+        debug!(conv = self.conv, limit = limit);
         let cwnd = min(self.config.send_wnd, self.rmt_wnd);
         while self.send_nxt < self.send_una + cwnd as u32
             && !self.send_queue.is_empty()
@@ -791,6 +797,7 @@ impl ControlBlock {
     /// Flushes packets from the [send queue](#structfield.send_queue) to the
     /// [send buffer](#structfield.send_buf), and (re)transmits the packets in the send buffer
     /// if necessary.
+    #[instrument]
     pub fn flush(&mut self) {
         self.sync_now();
         self.flush_probe();

@@ -8,17 +8,17 @@ use crate::config::get_config;
 use anyhow::Result;
 use std::env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::{sleep, Duration};
-use tracing::{info, Level};
+
+use tracing::{info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 fn setup_subscriber() -> Result<()> {
-    let fmt_layer = tracing_subscriber::fmt::Layer::default();
-    let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
+    // let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
     tracing_subscriber::registry()
-        .with(fmt_layer)
-        .with(flame_layer)
+        .with(tracing_subscriber::fmt::Layer::default())
+        // .with(flame_layer)
+        .with(tracing_opentelemetry::layer())
         .init();
     Ok(())
 }
@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
     if get_config().remote.is_none() {
         let session = session::Session::incoming().await;
         let _greeting = session.recv().await;
-        info!("received session: {}", session);
+        info!("received session: {:?}", session);
         let mut file = tokio::fs::File::open("sample").await?;
         let mut buf = vec![0u8; get_config().kcp.mss()];
         loop {
@@ -68,38 +68,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn test_kcp() {
-    use kcp::ControlBlock;
-    use tokio::select;
-    use tokio::time::{interval, Duration, Instant};
-    let mut kcp1 = ControlBlock::new(12345, get_config().kcp.clone());
-    let mut kcp2 = ControlBlock::new(12345, get_config().kcp.clone());
-    let mut update = interval(Duration::from_millis(get_config().kcp.interval as u64));
-    let mut message = interval(Duration::from_millis(100));
-    loop {
-        select! {
-            _ = message.tick() => {
-                kcp1.send(b"hello, kcp2!").unwrap();
-                kcp2.send(b"hello, kcp1!").unwrap();
-            }
-            _ = update.tick() => {
-                kcp1.flush();
-                kcp2.flush();
-            }
-        }
-        while let Some(output) = kcp1.output() {
-            kcp2.input(&output).unwrap();
-        }
-        while let Some(output) = kcp2.output() {
-            kcp1.input(&output).unwrap();
-        }
-        while let Ok(msg) = kcp2.recv() {
-            info!("kcp2 recv message: {:?}", msg);
-        }
-        while let Ok(msg) = kcp1.recv() {
-            info!("kcp1 recv message: {:?}", msg);
-        }
-    }
 }
