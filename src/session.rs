@@ -90,9 +90,10 @@ impl Session {
                 'update_loop: loop {
                     {
                         let mut kcp = control_cloned.0.lock();
-                        kcp.update();
+                        kcp.flush();
                         control_cloned.1.notify_waiters();
                         while let Some(mut raw) = kcp.output() {
+
                             if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
                                 icmp_tx.send((peer, raw)).unwrap();
                             } else {
