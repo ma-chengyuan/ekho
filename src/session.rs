@@ -19,35 +19,40 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //! Build sessions above the raw KCP algorithm
 
+#![allow(dead_code)]
 use crate::config::get_config;
 use crate::icmp::IcmpEndpoint;
 
-use crate::kcp::ControlBlock;
+use crate::kcp::{ControlBlock, Error};
 use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
+use parking_lot::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use rustc_hash::FxHasher;
 use std::fmt;
 use std::hash::BuildHasherDefault;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use tokio::select;
-use tokio::sync::mpsc::{
-    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
-};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, sleep_until, Duration, Instant};
+use tokio::time::{sleep, Duration};
 use tracing::{debug_span, error, info, Instrument};
 
+type Control = (Mutex<ControlBlock>, Notify);
+
 lazy_static! {
-    static ref RAW_TX: DashMap<(IcmpEndpoint, u32), Sender<Vec<u8>>, BuildHasherDefault<FxHasher>> =
+    static ref CONTROLS: DashMap<(IcmpEndpoint, u32), Weak<Control>, BuildHasherDefault<FxHasher>> =
         Default::default();
     static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&get_config().key);
     static ref NONCE: Nonce = Nonce::default();
-    static ref INCOMING: (UnboundedSender<Session>, Mutex<UnboundedReceiver<Session>>) = {
+    static ref INCOMING: (UnboundedSender<Session>, AsyncMutex<UnboundedReceiver<Session>>) = {
         let (tx, rx) = unbounded_channel();
-        (tx, Mutex::new(rx))
+        (tx, AsyncMutex::new(rx))
     };
 }
 
@@ -55,93 +60,64 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A session, built on top of KCP
 pub struct Session {
-    updater: JoinHandle<()>,
-    // Expose sender and receiver, so they may be used separately
-    pub sender: Sender<Vec<u8>>,
-    pub receiver: Receiver<Vec<u8>>,
     conv: u32,
     peer: IcmpEndpoint,
+    updater: JoinHandle<()>,
+    control: Arc<Control>,
+    peer_closing: Arc<AtomicBool>,
+    local_closing: Arc<AtomicBool>,
 }
 
 impl Session {
     /// Creates a new session given a peer endpoint and a conv.
     pub fn new(peer: IcmpEndpoint, conv: u32) -> Self {
-        assert!(!RAW_TX.contains_key(&(peer, conv)));
+        assert!(!CONTROLS.contains_key(&(peer, conv)));
         // The naming here is very nasty!
-        let send_wnd = get_config().kcp.send_wnd as usize;
-        let recv_wnd = get_config().kcp.recv_wnd as usize;
-        let (sender, mut send_rx) = channel::<Vec<u8>>(send_wnd);
-        let (recv_tx, receiver) = channel(recv_wnd);
-        let (raw_tx, mut raw_rx) = channel(recv_wnd);
-        RAW_TX.insert((peer, conv), raw_tx);
+        let control = Arc::new((
+            Mutex::new(ControlBlock::new(conv, get_config().kcp.clone())),
+            Notify::new(),
+        ));
+        let control_cloned = control.clone();
+        CONTROLS.insert((peer, conv), Arc::downgrade(&control_cloned));
+        let peer_closing = Arc::new(AtomicBool::new(false));
+        let local_closing = Arc::new(AtomicBool::new(false));
+        let peer_closing_cloned = peer_closing.clone();
+        let local_closing_cloned = local_closing.clone();
         let updater = task::spawn(
             async move {
-                let start = Instant::now();
-                let mut next_update = start;
-                let mut kcp = ControlBlock::new(conv, get_config().kcp.clone());
                 let icmp_tx = crate::icmp::clone_sender().await;
-                let mut local_closing = false;
-                let mut peer_closing = false;
-                let interval = get_config().kcp.interval as u64;
-                'u: while !(kcp.dead_link() || local_closing && peer_closing && kcp.all_flushed()) {
-                    select! {
-                        _ = sleep_until(next_update) => { /* time for a regular update */ }
-                        // Interrupted by datagrams sent bu the upper level
-                        res = send_rx.recv(), if kcp.wait_send() < send_wnd => {
-                            match res {
-                                None => break,
-                                Some(data) => {
-                                    local_closing |= data.is_empty();
-                                    kcp.send(&data).unwrap()
-                                }
+                let interval = Duration::from_millis(get_config().kcp.interval as u64);
+                'update_loop: loop {
+                    {
+                        let mut kcp = control_cloned.0.lock();
+                        kcp.update();
+                        control_cloned.1.notify_waiters();
+                        while let Some(mut raw) = kcp.output() {
+                            if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
+                                icmp_tx.send((peer, raw)).unwrap();
+                            } else {
+                                error!("error encrypting block");
+                                break 'update_loop;
                             }
                         }
-                        // Interrupted by raw packets received from the lower ICMP level
-                        res = raw_rx.recv() => {
-                            match res {
-                                None => break,
-                                Some(raw) => { kcp.input(&raw).unwrap(); }
-                            }
-                        }
-                        // If we can send packets to be processed by the upper level, send them
-                        res = recv_tx.reserve() => {
-                            match res {
-                                Err(_) => break,
-                                Ok(permit) => {
-                                    if let Ok(data) = kcp.recv() {
-                                        peer_closing |= data.is_empty();
-                                        permit.send(data);
-                                    }
-                                    continue
-                                }
-                            }
+                        let peer_closing = peer_closing_cloned.load(Ordering::SeqCst);
+                        let local_closing = local_closing_cloned.load(Ordering::SeqCst);
+                        if kcp.dead_link() || peer_closing && local_closing && kcp.all_flushed() {
+                            break;
                         }
                     }
-                    kcp.update(start.elapsed().as_millis() as u32);
-                    next_update = Instant::now() + Duration::from_millis(interval);
-                    let span = debug_span!("send ICMP packets");
-                    let _guard = span.enter();
-                    while let Some(mut raw) = kcp.output() {
-                        // dissect_headers_from_raw(&raw, "send");
-                        if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
-                            // ICMP receiver (CHANNEL.1 in crate::icmp) never closes, so unwrapping is
-                            // safe here.
-                            icmp_tx.send((peer, raw)).unwrap();
-                        } else {
-                            error!("error encrypting block");
-                            break 'u;
-                        }
-                    }
+                    sleep(interval).await;
                 }
             }
-            .instrument(debug_span!("scheduler")),
+            .instrument(debug_span!("update_loop")),
         );
         Session {
-            sender,
-            receiver,
             conv,
             peer,
+            control,
             updater,
+            peer_closing,
+            local_closing,
         }
     }
 
@@ -149,13 +125,43 @@ impl Session {
         INCOMING.1.lock().await.recv().await.unwrap()
     }
 
-    pub async fn close(&mut self) {
-        self.sender.send(Vec::new()).await.unwrap_or_default();
+    pub async fn send(&self, buf: &[u8]) {
+        loop {
+            let mut kcp = self.control.0.lock();
+            if kcp.wait_send() < kcp.config().send_wnd as usize {
+                if buf.is_empty() {
+                    self.local_closing.store(true, Ordering::SeqCst);
+                }
+                kcp.send(buf).unwrap();
+                break;
+            }
+            self.control.1.notified().await;
+        }
+    }
+
+    pub async fn recv(&self) -> Vec<u8> {
+        loop {
+            let mut kcp = self.control.0.lock();
+            match kcp.recv() {
+                Ok(data) => {
+                    if data.is_empty() {
+                        self.peer_closing.store(true, Ordering::SeqCst);
+                    }
+                    return data;
+                }
+                Err(Error::NotAvailable) => self.control.1.notified().await,
+                Err(err) => Err(err).unwrap(),
+            }
+        }
+    }
+
+    pub async fn close(self) {
         select! {
             _ = sleep(CLOSE_TIMEOUT) => {}
-            // If we take the initiative, then here we wait for an empty segment from the peer
-            // If we are passive, then closing should already contain values
-            _ = &mut self.updater => info!("{} ended normally", self)
+            _ = async {
+                self.send(b"").await;
+                self.updater.await.unwrap();
+            } => {}
         }
     }
 }
@@ -175,23 +181,16 @@ async fn recv_loop() {
         }
         let conv = crate::kcp::conv_from_raw(&raw);
         let key = &(from, conv);
-        // dissect_headers_from_raw(&raw, "recv");
-        if !RAW_TX.contains_key(key) && crate::kcp::first_push_packet(&raw) {
-            // The receiver of INCOMING obviously never closes, so unwrapping is safe here
+        let mut control = CONTROLS.get(key).and_then(|weak| weak.upgrade());
+        if control.is_none() && crate::kcp::first_push_packet(&raw) {
             let new_session = Session::new(from, conv);
             INCOMING.0.send(new_session).unwrap_or_default();
+            control = CONTROLS.get(key).and_then(|weak| weak.upgrade());
         }
-        if let Some(raw_tx) = RAW_TX.get(key) {
-            if let Err(_err) = raw_tx
-                .send(raw)
-                .instrument(debug_span!("raw_tx send"))
-                .await
-            {
-                error!(
-                    "error feeding raw packets to {}:{}@{}",
-                    from.ip, from.id, conv
-                );
-            }
+        if let Some(control) = control {
+            let mut kcp = control.0.lock();
+            kcp.input(&raw).unwrap();
+            control.1.notify_waiters();
         }
     }
 }

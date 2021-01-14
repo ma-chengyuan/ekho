@@ -27,15 +27,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //!
 //! This is 100% compatible with other KCP implementations.
 
+mod timer;
+mod window;
+
 use bytes::{Buf, BufMut};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use rand::{thread_rng, Rng};
 use serde::Deserialize;
-use std::cmp::{max, min, Ordering};
-use std::collections::{BTreeMap, VecDeque};
+use std::cmp::{max, min};
+use std::collections::VecDeque;
 use std::convert::TryInto;
+use std::time::{Duration, Instant};
 use thiserror::Error;
-use tracing::instrument;
+use timer::Timer;
+use window::Window;
 
 /// KCP error type.
 #[derive(Debug, Error)]
@@ -96,10 +101,10 @@ pub struct Config {
     pub nodelay: bool,
     /// In stream mode, multiple datagrams may be merged into one segment to reduce overhead.
     pub stream: bool,
-    /// If non-zero, then a segment after this many skip-acks will be retransmitted immediately.
-    pub fast_rexmit_thres: u32,
+    /// A segment after this many skip-acks will be retransmitted immediately.
+    pub fast_rexmit_thres: Option<u32>,
     /// Cap the maximum # of fast retransmission attempts.
-    pub fast_rexmit_limit: u32,
+    pub fast_rexmit_limit: Option<u32>,
     pub bbr: bool,
     /// Window length (unit: ms) for RTprop (Round-trip propagation time) filters in BBR.
     pub rt_prop_wnd: u32,
@@ -134,8 +139,8 @@ impl Default for Config {
             dead_link_thres: 20,
             nodelay: false,
             stream: false,
-            fast_rexmit_thres: 0,
-            fast_rexmit_limit: 5,
+            fast_rexmit_thres: None,
+            fast_rexmit_limit: None,
             bbr: false,
             rt_prop_wnd: 10000,
             btl_bw_wnd: 10,
@@ -151,7 +156,7 @@ impl Default for Config {
 struct Segment {
     frg: u8, ts: u32, sn: u32,
     /// Time for next retransmission
-    ts_rexmit: u32,
+    ts_xmit: u32,
     rto: u32,
     /// Number of times the packet is skip-ACKed.
     skip_acks: u32,
@@ -169,7 +174,6 @@ struct Segment {
 /// KCP control block with BBR congestion control.
 ///
 /// This control block is **NOT** safe for concurrent access -- to do so please wrap it in a Mutex.
-#[derive(Debug)]
 pub struct ControlBlock {
     /// Conversation ID.
     conv: u32,
@@ -193,8 +197,6 @@ pub struct ControlBlock {
     rmt_wnd: u16,
     /// Current timestamp (ms).
     now: u32,
-    /// Whether the control block is updated at least once.
-    updated: bool,
     /// Timestamp for next flush.
     ts_flush: u32,
     /// Timestamp for next probe.
@@ -210,16 +212,18 @@ pub struct ControlBlock {
     /// Receive queue, which stores packets that are received but not consumed by the application.
     recv_queue: VecDeque<Segment>,
     /// Send buffer, which stores packets sent but not yet acknowledged.
-    send_buf: VecDeque<Segment>,
+    send_buf: Window<Segment>,
     /// Receive buffer, which stores packets that arrive but cannot be used because a preceding
     /// packet hasn't arrived yet.
-    recv_buf: BTreeMap<u32, Segment>,
-    /// ACKs to be sent in the next flush.
-    ack_pending: Vec<(/* sn */ u32, /* ts */ u32)>,
+    recv_buf: Window<Segment>,
+    /// Timer to schedule packet transmission
+    timer: Timer,
     /// Output queue, the outer application should actively poll from this queue.
     output: VecDeque<Vec<u8>>,
     /// Buffer used to merge small packets into a batch (thus making better use of bandwidth).
     buffer: Vec<u8>,
+    /// The instant of the creation of the control block
+    epoch: Instant,
 
     /// Time of receiving the last ACK packet.
     ts_last_ack: u32,
@@ -274,14 +278,14 @@ impl ControlBlock {
             probe_ask: false,
             probe_tell: false,
             probe_timeout: 0,
-            updated: false,
             send_queue: Default::default(),
             recv_queue: Default::default(),
-            send_buf: Default::default(),
-            recv_buf: Default::default(),
-            ack_pending: Default::default(),
+            send_buf: Window::with_size(config.send_wnd as usize),
+            recv_buf: Window::with_size(config.recv_wnd as usize),
+            timer: Timer::with_capacity(config.send_wnd as usize),
             output: Default::default(),
             buffer: Vec::with_capacity(config.mtu as usize),
+            epoch: Instant::now(),
 
             delivered: 0,
             ts_last_ack: 0,
@@ -322,7 +326,6 @@ impl ControlBlock {
     /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one receive
     /// corresponds to one [send](#method.send) on the other side. Otherwise, this correlation
     /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
-    #[instrument]
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         let size = self.peek_size()?;
         let mut ret = Vec::with_capacity(size);
@@ -345,7 +348,6 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
-    #[instrument]
     pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
         let mss = self.config.mss();
         if self.config.stream {
@@ -363,11 +365,7 @@ impl ControlBlock {
                 }
             }
         }
-        let count = if buf.len() <= mss {
-            1 // Since integer division may be expensive, explicitly give this branch to accelerate
-        } else {
-            (buf.len() + mss - 1) / mss
-        };
+        let count = (buf.len() + mss - 1) / mss;
         if count > MAX_FRAGMENTS as usize {
             return Err(Error::OversizePacket);
         }
@@ -386,6 +384,7 @@ impl ControlBlock {
             });
             buf = back;
         }
+        self.flush_push();
         Ok(())
     }
 
@@ -425,12 +424,7 @@ impl ControlBlock {
         if self.now >= seg.ts && seg.xmits == 1 {
             let rtt = max(self.now - seg.ts, 1);
             self.update_rtt_filters(rtt);
-            while self
-                .rt_prop_queue
-                .back()
-                .map(|p| p.1 >= rtt)
-                .unwrap_or(false)
-            {
+            while self.rt_prop_queue.back().map_or(false, |p| p.1 >= rtt) {
                 self.rt_prop_queue.pop_back().unwrap();
             }
             self.rt_prop_queue.push_back((self.now, rtt));
@@ -438,8 +432,7 @@ impl ControlBlock {
                 while self
                     .rt_prop_queue
                     .front()
-                    .map(|p| p.0 + self.config.rt_prop_wnd <= self.now)
-                    .unwrap_or(false)
+                    .map_or(false, |p| p.0 + self.config.rt_prop_wnd <= self.now)
                 {
                     self.rt_prop_queue.pop_front().unwrap();
                 }
@@ -449,20 +442,12 @@ impl ControlBlock {
             let btl_bw = (self.delivered - seg.delivered)
                 / max(self.ts_last_ack - seg.ts_last_ack, 1) as usize;
             if !seg.app_limited || btl_bw > self.btl_bw_queue.front().map(|p| p.1).unwrap_or(0) {
-                while self
-                    .btl_bw_queue
-                    .front()
-                    .map(|p| p.0 + self.config.btl_bw_wnd * self.srtt <= self.now)
-                    .unwrap_or(false)
-                {
+                while self.btl_bw_queue.front().map_or(false, |p| {
+                    p.0 + self.config.btl_bw_wnd * self.srtt <= self.now
+                }) {
                     self.btl_bw_queue.pop_front().unwrap();
                 }
-                while self
-                    .btl_bw_queue
-                    .back()
-                    .map(|p| p.1 <= btl_bw)
-                    .unwrap_or(false)
-                {
+                while self.btl_bw_queue.back().map_or(false, |p| p.1 <= btl_bw) {
                     self.btl_bw_queue.pop_back().unwrap();
                 }
                 self.btl_bw_queue.push_back((self.now, btl_bw));
@@ -476,34 +461,42 @@ impl ControlBlock {
             self.bbr_state = BBRState::Startup;
             return;
         }
-        if let BBRState::Startup = self.bbr_state {
-            if !self.btl_bw_queue.is_empty()
-                && self.btl_bw_queue.front().unwrap().0 + 3 * self.srtt <= self.now
-            {
-                // Bottle neck bandwidth has not been updated in 3 RTTs, indicating that the pipe
-                // is filled and we have probe the bandwidth, enter drain
-                self.bbr_state = BBRState::Drain;
+        match self.bbr_state {
+            BBRState::Startup => {
+                if !self.btl_bw_queue.is_empty()
+                    && self.btl_bw_queue.front().unwrap().0 + 3 * self.srtt <= self.now
+                {
+                    // Bottle neck bandwidth has not been updated in 3 RTTs, indicating that the pipe
+                    // is filled and we have probe the bandwidth, enter drain
+                    self.bbr_state = BBRState::Drain;
+                }
             }
-        } else if let BBRState::Drain = self.bbr_state {
-            if self.inflight <= self.bdp() {
-                let phase: usize = thread_rng().gen_range(0, 7);
-                self.bbr_state =
-                    BBRState::ProbeBW(self.now, if phase >= 1 { phase + 1 } else { phase });
+            BBRState::Drain => {
+                if self.inflight <= self.bdp() {
+                    let phase: usize = thread_rng().gen_range(0, BBR_GAIN_CYCLE.len() - 1);
+                    self.bbr_state =
+                        BBRState::ProbeBW(self.now, if phase >= 1 { phase + 1 } else { phase });
+                }
             }
-        } else if let BBRState::ProbeBW(since, phase) = self.bbr_state {
-            let last_rt_prop_update = self.rt_prop_queue.front().unwrap().0;
-            if last_rt_prop_update + self.config.rt_prop_wnd <= self.now && !self.rt_prop_expired {
-                self.bbr_state = BBRState::ProbeRTT(self.now, phase);
-                self.rt_prop_expired = true;
-            } else if since + self.srtt <= self.now {
-                // Each gain cycle phase lasts for one RTT
-                self.bbr_state = BBRState::ProbeBW(self.now, (phase + 1) % BBR_GAIN_CYCLE.len());
+            BBRState::ProbeBW(since, phase) => {
+                let last_rt_prop_update = self.rt_prop_queue.front().unwrap().0;
+                if last_rt_prop_update + self.config.rt_prop_wnd <= self.now
+                    && !self.rt_prop_expired
+                {
+                    self.bbr_state = BBRState::ProbeRTT(self.now, phase);
+                    self.rt_prop_expired = true;
+                } else if since + self.srtt <= self.now {
+                    // Each gain cycle phase lasts for one RTT
+                    self.bbr_state =
+                        BBRState::ProbeBW(self.now, (phase + 1) % BBR_GAIN_CYCLE.len());
+                }
             }
-        } else if let BBRState::ProbeRTT(since, phase) = self.bbr_state {
-            if since + self.config.probe_rtt_time <= self.now {
-                self.bbr_state = BBRState::ProbeBW(self.now, phase);
+            BBRState::ProbeRTT(since, phase) => {
+                if since + self.config.probe_rtt_time <= self.now {
+                    self.bbr_state = BBRState::ProbeBW(self.now, phase);
+                }
             }
-        }
+        };
     }
 
     /// Removes the packet from the [send buffer](#structfield.send_buf) whose sequence number is `sn`
@@ -511,16 +504,8 @@ impl ControlBlock {
     fn ack_packet_with_sn(&mut self, sn: u32) {
         // tracing::debug!("ack sn {} {} {}", sn, self.send_una, self.send_nxt);
         if self.send_una <= sn && sn < self.send_nxt {
-            for i in 0..self.send_buf.len() {
-                match sn.cmp(&self.send_buf[i].sn) {
-                    Ordering::Less => break,
-                    Ordering::Greater => continue,
-                    Ordering::Equal => {
-                        let seg = self.send_buf.remove(i).unwrap();
-                        self.update_bbr_on_ack(&seg);
-                        break;
-                    }
-                }
+            if let Some(seg) = self.send_buf.remove(sn as usize) {
+                self.update_bbr_on_ack(&seg)
             }
         }
     }
@@ -528,40 +513,46 @@ impl ControlBlock {
     /// Removes packets from the [send buffer](#structfield.send_buf) whose sequence number is less
     /// than `una` and marks them as acknowledged.
     fn ack_packets_before_una(&mut self, una: u32) {
-        while !self.send_buf.is_empty() && self.send_buf[0].sn < una {
-            let seg = self.send_buf.pop_front().unwrap();
-            // tracing::debug!("ack una {} < {}", seg.sn, una);
+        while matches!(self.send_buf.front(), Some(seg) if seg.sn < una) {
+            let seg = self.send_buf.pop_unchecked();
             self.update_bbr_on_ack(&seg);
         }
     }
 
     /// Increases the skip-ACK count of packets with sequence number less than `sn` (useful in KCP
     /// fast retransmission).
-    fn increase_skip_acks(&mut self, sn: u32, _ts: u32) {
+    fn increase_skip_acks(&mut self, sn: u32) {
         if self.send_una <= sn && sn < self.send_nxt {
-            // seg.sn increasing
-            for seg in self.send_buf.iter_mut() {
-                if seg.sn < sn {
-                    seg.skip_acks += 1;
-                } else {
-                    break;
+            // Copy values from self to keep Rust borrow checker happy
+            let fast_rexmit_thres = self.config.fast_rexmit_thres;
+            let fast_rexmit_limit = self.config.fast_rexmit_limit;
+            let timer = &mut self.timer;
+            let now = self.now;
+            self.send_buf.for_preceding(sn as usize, |seg| {
+                seg.skip_acks += 1;
+                if fast_rexmit_thres.map_or(false, |thres| seg.skip_acks == thres)
+                    && fast_rexmit_limit.map_or(true, |limit| seg.xmits <= limit)
+                {
+                    seg.ts_xmit = now;
+                    timer.schedule(now, seg.sn);
                 }
-            }
+            });
         }
     }
 
     /// Pushes a segment onto the [receive buffer](#structfield.recv_buf), and if possible, moves
     /// segments from the receiver buffer to the [receive queue](#structfield.recv_queue).
     fn push_segment(&mut self, seg: Segment) {
-        self.recv_buf.entry(seg.sn).or_insert(seg);
+        self.recv_buf.push(seg.sn as usize, seg);
         // Move packets from the buffer to the receive queue if possible
-        while !self.recv_buf.is_empty()
-            && self.recv_buf.iter().next().unwrap().1.sn == self.recv_nxt
-            && self.recv_queue.len() < self.config.recv_wnd as usize
-        {
-            self.recv_queue
-                .push_back(self.recv_buf.remove(&self.recv_nxt).unwrap());
-            self.recv_nxt += 1;
+        while !self.recv_buf.is_empty() && self.recv_queue.len() < self.config.recv_wnd as usize {
+            match self.recv_buf.remove(self.recv_nxt as usize) {
+                Some(seg) => {
+                    self.recv_queue.push_back(seg);
+                    self.recv_nxt += 1;
+                }
+                None => break,
+            }
         }
     }
 
@@ -571,21 +562,14 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
-    #[instrument]
     pub fn input(&mut self, mut data: &[u8]) -> Result<usize> {
+        self.sync_now();
         let prev_len = data.len();
-        let mut has_ack = false;
-        let mut sn_max_ack = 0;
-        let mut ts_max_ack = 0;
-
+        let mut sn_max_ack = None;
         if data.len() < OVERHEAD as usize {
             return Err(Error::IncompletePacket);
         }
-
-        loop {
-            if data.len() < OVERHEAD as usize {
-                break;
-            }
+        while data.len() >= OVERHEAD as usize {
             let (mut header, body) = data.split_at(OVERHEAD as usize);
             // Read header
             let conv = header.get_u32_le();
@@ -614,15 +598,11 @@ impl ControlBlock {
                 Command::Ack => {
                     self.ack_packet_with_sn(sn);
                     self.update_una();
-                    if !has_ack || sn > sn_max_ack {
-                        has_ack = true;
-                        sn_max_ack = sn;
-                        ts_max_ack = ts;
-                    }
+                    sn_max_ack = Some(max(sn, sn_max_ack.unwrap_or_default()));
                 }
                 Command::Push => {
                     if sn < self.recv_nxt + self.config.recv_wnd as u32 {
-                        self.ack_pending.push((sn, ts));
+                        self.flush_segment(Command::Ack, 0, sn, ts, 0);
                         if sn >= self.recv_nxt {
                             self.push_segment(Segment {
                                 sn,
@@ -638,18 +618,11 @@ impl ControlBlock {
             }
             data = &data[len..];
         }
-        if has_ack && self.config.fast_rexmit_thres > 0 {
-            // OPTIMIZE: if we have a large receive window and a large flow of traffic, the
-            //  increase_skip_acks operation here may become computationally demanding, because
-            //  it has a worst-case linear time complexity. It is perhaps better to limit the
-            //  frequency to call it, perhaps every self.interval or so. This would of course
-            //  undermine its purpose of fast-retransmission, but would reduce CPU usage. Another
-            //  solution is to maintain send_buf with a modified BST to ensure log complexity of
-            //  increase_skip_acks operation, but the effect may be canceled out by the constant
-            //  factor.
-            self.increase_skip_acks(sn_max_ack, ts_max_ack);
+        if let Some(sn) = self.config.fast_rexmit_thres.and(sn_max_ack) {
+            self.increase_skip_acks(sn)
         }
         self.update_bbr_state();
+        self.flush_push();
         Ok(prev_len - data.len())
     }
 
@@ -701,16 +674,6 @@ impl ControlBlock {
         self.buffer.put_u32_le(len as u32);
     }
 
-    /// Flush all pending ACKs
-    fn flush_ack(&mut self) {
-        let mut old_ack_list = Vec::new();
-        std::mem::swap(&mut self.ack_pending, &mut old_ack_list);
-        for (sn, ts) in old_ack_list {
-            self.flush_segment(Command::Ack, 0, sn, ts, 0);
-            // tracing::debug!("ack sent {}", sn);
-        }
-    }
-
     /// Flush all window-probing-related segments
     fn flush_probe(&mut self) {
         self.update_probe();
@@ -749,15 +712,30 @@ impl ControlBlock {
     }
 
     /// Prepare a segment for (re)transmission
-    fn prepare_xmit(&self, seg: &mut Segment) -> bool {
-        if seg.xmits == 0 {
+    #[rustfmt::skip]
+    fn prepare_xmit(&self, seg: &mut Segment) {
+        seg.xmits += 1;
+        seg.ts = self.now;
+        seg.delivered = self.delivered;
+        seg.ts_last_ack = self.ts_last_ack;
+        seg.app_limited = self.app_limited_until > 0;
+        // First retransmission
+        if seg.xmits == 1 {
             seg.rto = self.rto;
-            seg.ts_rexmit = self.now + seg.rto;
+            seg.skip_acks = 0;
+            seg.ts_xmit = self.now + seg.rto;
             if !self.config.nodelay {
-                seg.ts_rexmit += self.config.rto_min;
+                seg.ts_xmit += self.config.rto_min;
             }
-            return true;
-        } else if self.now >= seg.ts_rexmit {
+        } else if self.config.fast_rexmit_thres
+            .map_or(false, |thres| seg.skip_acks >= thres)
+            && self.config.fast_rexmit_limit
+                .map_or(true, |limit| seg.xmits <= limit)
+        {
+            // Fast retransmission
+            seg.skip_acks = 0;
+            seg.ts_xmit = self.now + seg.rto;
+        } else {
             // Regular retransmission
             seg.rto = if self.config.nodelay {
                 max(seg.rto, self.rto)
@@ -765,18 +743,8 @@ impl ControlBlock {
                 // Increase RTO by 1.5x, better than 2x in TCP
                 seg.rto + seg.rto / 2
             };
-            seg.ts_rexmit = self.now + seg.rto;
-            return true;
-        } else if self.config.fast_rexmit_thres != 0
-            && seg.skip_acks >= self.config.fast_rexmit_thres
-            && (seg.xmits <= self.config.fast_rexmit_limit || self.config.fast_rexmit_limit == 0)
-        {
-            // Fast retransmission
-            seg.skip_acks = 0;
-            seg.ts_rexmit = self.now + seg.rto;
-            return true;
+            seg.ts_xmit = self.now + seg.rto;
         }
-        false
     }
 
     fn flush_push(&mut self) {
@@ -790,25 +758,27 @@ impl ControlBlock {
             seg.sn = self.send_nxt;
             self.send_nxt += 1;
             self.inflight += seg.payload.len() + OVERHEAD as usize;
-            self.send_buf.push_back(seg);
+            seg.ts_xmit = self.now;
+            self.timer.schedule(self.now, seg.sn);
+            self.send_buf.push(seg.sn as usize, seg);
             if self.inflight <= limit && self.send_queue.is_empty() {
                 self.app_limited_until = self.inflight;
             }
         }
-        // (Re)transmit segments in the send buffer
-        // Use mem::take to work around the rust borrow checker since it does not yet support
-        // partial-borrowing
+
         let mut send_buf = std::mem::take(&mut self.send_buf);
-        for seg in send_buf.iter_mut() {
-            if self.prepare_xmit(seg) {
-                seg.xmits += 1;
-                seg.ts = self.now;
-                seg.delivered = self.delivered;
-                seg.ts_last_ack = self.ts_last_ack;
-                seg.app_limited = self.app_limited_until > 0;
-                self.dead_link |= seg.xmits >= self.config.dead_link_thres;
-                self.flush_segment(Command::Push, seg.frg, seg.sn, seg.ts, seg.payload.len());
-                self.buffer.extend_from_slice(&seg.payload);
+        while let Some((ts, sn)) = self.timer.event(self.now) {
+            if sn < self.send_una || sn >= self.send_nxt {
+                continue;
+            }
+            if let Some(seg) = send_buf.get_mut(sn as usize) {
+                if ts == seg.ts_xmit {
+                    self.prepare_xmit(seg);
+                    self.dead_link |= seg.xmits >= self.config.dead_link_thres;
+                    self.flush_segment(Command::Push, seg.frg, seg.sn, seg.ts, seg.payload.len());
+                    self.buffer.extend_from_slice(&seg.payload);
+                    self.timer.schedule(seg.ts_xmit, seg.sn);
+                }
             }
         }
         self.send_buf = send_buf;
@@ -817,12 +787,8 @@ impl ControlBlock {
     /// Flushes packets from the [send queue](#structfield.send_queue) to the
     /// [send buffer](#structfield.send_buf), and (re)transmits the packets in the send buffer
     /// if necessary.
-    #[instrument]
-    fn flush(&mut self) {
-        if !self.updated {
-            return;
-        }
-        self.flush_ack();
+    pub fn flush(&mut self) {
+        self.sync_now();
         self.flush_probe();
         self.flush_push();
         if !self.buffer.is_empty() {
@@ -833,16 +799,11 @@ impl ControlBlock {
     }
 
     /// Sets the internal time to `current` and then updates the whole control block.
-    #[instrument]
-    pub fn update(&mut self, now: u32) {
-        self.now = now;
-        if !self.updated {
-            self.updated = true;
-            self.ts_flush = now;
-        }
-        if self.ts_flush <= now {
+    pub fn update(&mut self) {
+        self.sync_now();
+        if self.ts_flush <= self.now {
             self.ts_flush += self.config.interval;
-            if self.ts_flush <= now {
+            if self.ts_flush <= self.now {
                 self.ts_flush = self.now + self.config.interval;
             }
             self.flush();
@@ -851,21 +812,15 @@ impl ControlBlock {
 
     /// Checks the next time you should call [update](#method.update) assuming current time is
     /// `current`.
-    pub fn check(&self, now: u32) -> u32 {
-        if !self.updated {
-            return now;
-        }
-        if self.ts_flush <= now {
-            return now;
-        }
-        let mut next_update = min(now + self.config.interval, self.ts_flush);
-        for seg in &self.send_buf {
-            if seg.ts_rexmit <= now {
-                return now;
-            }
-            next_update = min(next_update, seg.ts_rexmit);
-        }
-        next_update
+    pub fn check(&self) -> Instant {
+        let now = self.epoch.elapsed().as_millis() as u32;
+        let next_flush = min(now + self.config.interval, self.ts_flush);
+        let next_xmit = max(now, self.timer.imminent());
+        Instant::now() + Duration::from_millis(min(next_flush, next_xmit) as u64)
+    }
+
+    fn sync_now(&mut self) {
+        self.now = self.epoch.elapsed().as_millis() as u32;
     }
 
     /// Gets the number of packets wait to be sent. This includes both unsent packets and packets
@@ -879,7 +834,7 @@ impl ControlBlock {
     /// You may want to call this when you are about to drop this control block, to check if KCP has
     /// finished everything up.
     pub fn all_flushed(&self) -> bool {
-        self.send_buf.is_empty() && self.send_queue.is_empty() && self.ack_pending.is_empty()
+        self.send_buf.is_empty() && self.send_queue.is_empty() && self.buffer.is_empty()
     }
 
     /// Returns the Bandwidth-Delay Product.
@@ -899,6 +854,10 @@ impl ControlBlock {
 
     pub fn conv(&self) -> u32 {
         self.conv
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 }
 
