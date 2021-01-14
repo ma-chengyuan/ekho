@@ -365,7 +365,11 @@ impl ControlBlock {
                 }
             }
         }
-        let count = (buf.len() + mss - 1) / mss;
+        let count = if buf.len() <= mss {
+            1
+        } else {
+            (buf.len() + mss - 1) / mss
+        };
         if count > MAX_FRAGMENTS as usize {
             return Err(Error::OversizePacket);
         }

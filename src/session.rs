@@ -23,13 +23,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 use crate::config::get_config;
 use crate::icmp::IcmpEndpoint;
 
-use crate::kcp::{ControlBlock, Error, dissect_headers_from_raw};
+use crate::kcp::{dissect_headers_from_raw, ControlBlock, Error};
 use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
-use tokio::sync::Mutex as AsyncMutex;
 use rustc_hash::FxHasher;
 use std::fmt;
 use std::hash::BuildHasherDefault;
@@ -37,6 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tokio::select;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
@@ -50,7 +50,10 @@ lazy_static! {
         Default::default();
     static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&get_config().key);
     static ref NONCE: Nonce = Nonce::default();
-    static ref INCOMING: (UnboundedSender<Session>, AsyncMutex<UnboundedReceiver<Session>>) = {
+    static ref INCOMING: (
+        UnboundedSender<Session>,
+        AsyncMutex<UnboundedReceiver<Session>>
+    ) = {
         let (tx, rx) = unbounded_channel();
         (tx, AsyncMutex::new(rx))
     };
@@ -153,7 +156,7 @@ impl Session {
                         }
                         return data;
                     }
-                    Err(Error::NotAvailable) => {},
+                    Err(Error::NotAvailable) => {}
                     Err(err) => Err(err).unwrap(),
                 }
             }

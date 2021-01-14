@@ -8,10 +8,10 @@ use crate::config::get_config;
 use anyhow::Result;
 use std::env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::{sleep, Duration};
 use tracing::{info, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tokio::time::{sleep, Duration};
 
 fn setup_subscriber() -> Result<()> {
     let fmt_layer = tracing_subscriber::fmt::Layer::default();
@@ -37,26 +37,31 @@ async fn main() -> Result<()> {
     icmp::init_send_recv_loop().await?;
     session::init_recv_loop().await;
     // test_kcp().await;
-
     if get_config().remote.is_none() {
         let session = session::Session::incoming().await;
         let _greeting = session.recv().await;
         info!("received session: {}", session);
-        for _ in 0..1000 {
-            session.send(b"hello world").await;
-            sleep(Duration::from_millis(100)).await;
+        let mut file = tokio::fs::File::open("sample").await?;
+        let mut buf = vec![0u8; get_config().kcp.mss()];
+        loop {
+            let len = file.read(&mut buf).await?;
+            if len == 0 {
+                break;
+            }
+            session.send(&buf[..len]).await;
         }
         session.close().await;
         info!("closed");
     } else {
         let session = session::Session::new(get_config().remote.unwrap(), 998244353);
         session.send(b"\0").await;
+        let mut file = tokio::fs::File::create("sample").await?;
         loop {
             let data = session.recv().await;
-            info!("message received: {:?}", data);
             if data.is_empty() {
                 break;
             }
+            file.write_all(&data).await?;
         }
         session.close().await;
         info!("closed");
