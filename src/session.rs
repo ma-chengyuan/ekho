@@ -169,6 +169,9 @@ impl Session {
             _ = sleep(CLOSE_TIMEOUT) => {}
             _ = async {
                 self.send(b"").await;
+                while !self.peer_closing.load(Ordering::SeqCst) {
+                    let _discarded = self.recv().await;
+                }
                 self.updater.await.unwrap();
             } => {}
         }
