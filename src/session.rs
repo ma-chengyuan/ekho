@@ -23,7 +23,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 use crate::config::get_config;
 use crate::icmp::IcmpEndpoint;
 
-use crate::kcp::{ControlBlock, Error};
+use crate::kcp::{ControlBlock, Error, dissect_headers_from_raw};
 use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
@@ -93,7 +93,7 @@ impl Session {
                         kcp.flush();
                         control_cloned.1.notify_waiters();
                         while let Some(mut raw) = kcp.output() {
-
+                            // dissect_headers_from_raw(&raw, "send");
                             if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
                                 icmp_tx.send((peer, raw)).unwrap();
                             } else {
@@ -128,13 +128,15 @@ impl Session {
 
     pub async fn send(&self, buf: &[u8]) {
         loop {
-            let mut kcp = self.control.0.lock();
-            if kcp.wait_send() < kcp.config().send_wnd as usize {
-                if buf.is_empty() {
-                    self.local_closing.store(true, Ordering::SeqCst);
+            {
+                let mut kcp = self.control.0.lock();
+                if kcp.wait_send() < kcp.config().send_wnd as usize {
+                    if buf.is_empty() {
+                        self.local_closing.store(true, Ordering::SeqCst);
+                    }
+                    kcp.send(buf).unwrap();
+                    break;
                 }
-                kcp.send(buf).unwrap();
-                break;
             }
             self.control.1.notified().await;
         }
@@ -142,17 +144,20 @@ impl Session {
 
     pub async fn recv(&self) -> Vec<u8> {
         loop {
-            let mut kcp = self.control.0.lock();
-            match kcp.recv() {
-                Ok(data) => {
-                    if data.is_empty() {
-                        self.peer_closing.store(true, Ordering::SeqCst);
+            {
+                let mut kcp = self.control.0.lock();
+                match kcp.recv() {
+                    Ok(data) => {
+                        if data.is_empty() {
+                            self.peer_closing.store(true, Ordering::SeqCst);
+                        }
+                        return data;
                     }
-                    return data;
+                    Err(Error::NotAvailable) => {},
+                    Err(err) => Err(err).unwrap(),
                 }
-                Err(Error::NotAvailable) => self.control.1.notified().await,
-                Err(err) => Err(err).unwrap(),
             }
+            self.control.1.notified().await;
         }
     }
 
@@ -189,6 +194,7 @@ async fn recv_loop() {
             control = CONTROLS.get(key).and_then(|weak| weak.upgrade());
         }
         if let Some(control) = control {
+            // dissect_headers_from_raw(&raw, "recv");
             let mut kcp = control.0.lock();
             kcp.input(&raw).unwrap();
             control.1.notify_waiters();
