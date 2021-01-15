@@ -816,7 +816,9 @@ impl ControlBlock {
         if self.config.bbr {
             let rt_prop = self.rt_prop_queue.front().map_or(0, |p| p.1);
             let btl_bw = self.btl_bw_queue.front().map_or(0, |p| p.1);
-            debug!("rt_prop {:4}ms btl_bw {:7}KBps state {:?}", rt_prop, btl_bw, self.bbr_state);
+            let limit = self.calc_bbr_limit();
+            debug!("rt_prop {:4}ms btl_bw {:7}KBps limit {:9}B inflight {:9}B state {:?}",
+                   rt_prop, btl_bw, limit, self.inflight, self.bbr_state);
         }
         if !self.buffer.is_empty() {
             let mut new_buf = Vec::with_capacity(self.config.mtu as usize);
