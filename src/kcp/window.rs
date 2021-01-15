@@ -19,7 +19,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //! Linked Circular Array
 
-#[derive(Debug)]
 struct Element<T> {
     /// The index of its precedent, **MUST BE VALID AT ANY TIME.**
     prev: usize,
@@ -39,7 +38,6 @@ struct Element<T> {
 ///
 /// ...under the precondition that at any time, the range of keys at any time is upper-bounded by
 /// a constant (as is the case in sliding windows).
-#[derive(Debug)]
 pub struct Window<T> {
     /// Size of the array, must be immutable
     size: usize,

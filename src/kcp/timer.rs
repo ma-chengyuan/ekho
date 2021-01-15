@@ -21,7 +21,6 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 /// A quick and dirty implementation of an efficient timer used to schedule packet (re)transmission
-#[derive(Debug)]
 pub struct Timer(BinaryHeap<Reverse<u64>>);
 
 impl Timer {

@@ -31,6 +31,7 @@ mod timer;
 mod window;
 
 use bytes::{Buf, BufMut};
+use derivative::Derivative;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use rand::{thread_rng, Rng};
 use serde::Deserialize;
@@ -40,7 +41,7 @@ use std::convert::TryInto;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use timer::Timer;
-use tracing::{debug, instrument};
+use tracing::instrument;
 use window::Window;
 
 /// KCP error type.
@@ -82,39 +83,59 @@ enum Command {
 /// KCP configuration.
 ///
 /// All time-related items are in milliseconds.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Derivative)]
+#[derivative(Default)]
 #[serde(default)]
 pub struct Config {
+    #[derivative(Default(value = "1400"))]
     pub mtu: u32,
+    #[derivative(Default(value = "200"))]
     pub rto_default: u32,
+    #[derivative(Default(value = "100"))]
     pub rto_min: u32,
+    #[derivative(Default(value = "6000"))]
     pub rto_max: u32,
     /// Initial & minimal probe timeout
+    #[derivative(Default(value = "7000"))]
     pub probe_min: u32,
     /// Maximum probe timeout
+    #[derivative(Default(value = "120000"))]
     pub probe_max: u32,
+    #[derivative(Default(value = "1024"))]
     pub send_wnd: u16,
+    #[derivative(Default(value = "1024"))]
     pub recv_wnd: u16,
+    #[derivative(Default(value = "40"))]
     pub interval: u32,
-    /// After failure of this many retranmission attempts, the link will be considered to be dead.
+    /// After failure of this many retransmission attempts, the link will be considered to be dead.
+    #[derivative(Default(value = "20"))]
     pub dead_link_thres: u32,
     /// In nodelay mode, rto_min = 0 and rto does not exponentially grow.
+    #[derivative(Default(value = "false"))]
     pub nodelay: bool,
     /// In stream mode, multiple datagrams may be merged into one segment to reduce overhead.
+    #[derivative(Default(value = "false"))]
     pub stream: bool,
     /// A segment after this many skip-acks will be retransmitted immediately.
-    pub fast_rexmit_thres: Option<u32>,
+    #[derivative(Default(value = "None"))]
+    pub fast_resend_thres: Option<u32>,
     /// Cap the maximum # of fast retransmission attempts.
-    pub fast_rexmit_limit: Option<u32>,
+    #[derivative(Default(value = "None"))]
+    pub fast_resend_limit: Option<u32>,
+    #[derivative(Default(value = "false"))]
     pub bbr: bool,
     /// Window length (unit: ms) for RTprop (Round-trip propagation time) filters in BBR.
+    #[derivative(Default(value = "10000"))]
     pub rt_prop_wnd: u32,
     /// Window length (unit: RTT) for BtlBW (Bottleneck bandwidth) filters in BBR.
+    #[derivative(Default(value = "10"))]
     pub btl_bw_wnd: u32,
     /// Time for one ProbeRTT phase.
+    #[derivative(Default(value = "200"))]
     pub probe_rtt_time: u32,
     /// A multiplier than controls the aggressiveness of BBR. To avoid floating point arithmetic
     /// it is 1024-based e.g. set to 1024 for 1.0, 1536 for 1.5, and 2048 for 2.0 etc.
+    #[derivative(Default(value = "1536"))]
     pub bdp_gain: usize,
 }
 
@@ -124,45 +145,20 @@ impl Config {
     }
 }
 
-/// Gives a decent default configuration suitable for most use cases
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            mtu: 1400,
-            rto_default: 200,
-            rto_min: 100,
-            rto_max: 60000,
-            probe_min: 7000,
-            probe_max: 120000,
-            send_wnd: 1024,
-            recv_wnd: 1024,
-            interval: 10,
-            dead_link_thres: 20,
-            nodelay: false,
-            stream: false,
-            fast_rexmit_thres: None,
-            fast_rexmit_limit: None,
-            bbr: false,
-            rt_prop_wnd: 10000,
-            btl_bw_wnd: 10,
-            probe_rtt_time: 200,
-            bdp_gain: 1536,
-        }
-    }
-}
-
 /// KCP Data Segment
-#[derive(Debug, Default)]
+#[derive(Default, Derivative)]
+#[derivative(Debug)]
 #[rustfmt::skip]
 struct Segment {
     frg: u8, ts: u32, sn: u32,
     /// Time for next retransmission
-    ts_xmit: u32,
+    ts_send: u32,
     rto: u32,
     /// Number of times the packet is skip-ACKed.
     skip_acks: u32,
     /// Number of transmission attempts.
-    xmits: u32,
+    sends: u32,
+    #[derivative(Debug = "ignore")]
     payload: Vec<u8>,
     /// Delivered bytes when sent.
     delivered: usize,
@@ -175,11 +171,13 @@ struct Segment {
 /// KCP control block with BBR congestion control.
 ///
 /// This control block is **NOT** safe for concurrent access -- to do so please wrap it in a Mutex.
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ControlBlock {
     /// Conversation ID.
     conv: u32,
     /// KCP Config (should be immutable)
+    #[derivative(Debug = "ignore")]
     config: Config,
     /// If the underlying link is dead
     dead_link: bool,
@@ -210,21 +208,29 @@ pub struct ControlBlock {
     /// Probing timeout.
     probe_timeout: u32,
     /// Send queue, which stores packets that are enqueued but not in the send window.
+    #[derivative(Debug = "ignore")]
     send_queue: VecDeque<Segment>,
     /// Receive queue, which stores packets that are received but not consumed by the application.
+    #[derivative(Debug = "ignore")]
     recv_queue: VecDeque<Segment>,
     /// Send buffer, which stores packets sent but not yet acknowledged.
+    #[derivative(Debug = "ignore")]
     send_buf: Window<Segment>,
     /// Receive buffer, which stores packets that arrive but cannot be used because a preceding
     /// packet hasn't arrived yet.
+    #[derivative(Debug = "ignore")]
     recv_buf: Window<Segment>,
     /// Timer to schedule packet transmission
+    #[derivative(Debug = "ignore")]
     timer: Timer,
     /// Output queue, the outer application should actively poll from this queue.
+    #[derivative(Debug = "ignore")]
     output: VecDeque<Vec<u8>>,
     /// Buffer used to merge small packets into a batch (thus making better use of bandwidth).
+    #[derivative(Debug = "ignore")]
     buffer: Vec<u8>,
     /// The instant of the creation of the control block
+    #[derivative(Debug = "ignore")]
     epoch: Instant,
 
     /// Time of receiving the last ACK packet.
@@ -234,8 +240,10 @@ pub struct ControlBlock {
     /// Bytes currently inflight.
     inflight: usize,
     /// Monotonic queue for Round trip propagation time.
+    #[derivative(Debug = "ignore")]
     rt_prop_queue: VecDeque<(u32, u32)>,
     /// Monotonic queue for Bottleneck Bandwidth.
+    #[derivative(Debug = "ignore")]
     btl_bw_queue: VecDeque<(u32, usize)>,
     /// Whether the next BBR update should clear expired RTprop analysis.
     rt_prop_expired: bool,
@@ -328,7 +336,7 @@ impl ControlBlock {
     /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one receive
     /// corresponds to one [send](#method.send) on the other side. Otherwise, this correlation
     /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
-    #[instrument]
+    #[instrument(level = "trace", name = "kcp recv", skip(self))]
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         let size = self.peek_size()?;
         let mut ret = Vec::with_capacity(size);
@@ -351,7 +359,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
-    #[instrument]
+    #[instrument(level = "trace", name = "kcp send", skip(self, buf), fields(len = buf.len()))]
     pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
         let mss = self.config.mss();
         if self.config.stream {
@@ -426,10 +434,10 @@ impl ControlBlock {
         self.app_limited_until = self
             .app_limited_until
             .saturating_sub(seg.payload.len() + OVERHEAD as usize);
-        // xmits == 1 is necessary. If a packet is transmitted multiple times, and we receive an
+        // sends == 1 is necessary. If a packet is transmitted multiple times, and we receive an
         // UNA packet prior to the ACK packet, there is no way we can possibly know which
         // (re)transmission it was that reached the other side.
-        if self.now >= seg.ts && seg.xmits == 1 {
+        if self.now >= seg.ts && seg.sends == 1 {
             let rtt = max(self.now - seg.ts, 1);
             self.update_rtt_filters(rtt);
             while self.rt_prop_queue.back().map_or(false, |p| p.1 >= rtt) {
@@ -532,16 +540,16 @@ impl ControlBlock {
     fn increase_skip_acks(&mut self, sn: u32) {
         if self.send_una <= sn && sn < self.send_nxt {
             // Copy values from self to keep Rust borrow checker happy
-            let fast_rexmit_thres = self.config.fast_rexmit_thres;
-            let fast_rexmit_limit = self.config.fast_rexmit_limit;
+            let fast_resend_thres = self.config.fast_resend_thres;
+            let fast_resend_limit = self.config.fast_resend_limit;
             let timer = &mut self.timer;
             let now = self.now;
             self.send_buf.for_preceding(sn as usize, |seg| {
                 seg.skip_acks += 1;
-                if fast_rexmit_thres.map_or(false, |thres| seg.skip_acks == thres)
-                    && fast_rexmit_limit.map_or(true, |limit| seg.xmits <= limit)
+                if fast_resend_thres.map_or(false, |thres| seg.skip_acks == thres)
+                    && fast_resend_limit.map_or(true, |limit| seg.sends <= limit)
                 {
-                    seg.ts_xmit = now;
+                    seg.ts_send = now;
                     timer.schedule(now, seg.sn);
                 }
             });
@@ -570,6 +578,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
+    #[instrument(level = "trace", name = "kcp raw input", skip(self, data), fields(len = data.len()))]
     pub fn input(&mut self, mut data: &[u8]) -> Result<usize> {
         self.sync_now();
         let prev_len = data.len();
@@ -626,7 +635,7 @@ impl ControlBlock {
             }
             data = &data[len..];
         }
-        if let Some(sn) = self.config.fast_rexmit_thres.and(sn_max_ack) {
+        if let Some(sn) = self.config.fast_resend_thres.and(sn_max_ack) {
             self.increase_skip_acks(sn)
         }
         self.update_bbr_state();
@@ -721,28 +730,28 @@ impl ControlBlock {
 
     /// Prepare a segment for (re)transmission
     #[rustfmt::skip]
-    fn prepare_xmit(&self, seg: &mut Segment) {
-        seg.xmits += 1;
+    fn prepare_send(&self, seg: &mut Segment) {
+        seg.sends += 1;
         seg.ts = self.now;
         seg.delivered = self.delivered;
         seg.ts_last_ack = self.ts_last_ack;
         seg.app_limited = self.app_limited_until > 0;
         // First retransmission
-        if seg.xmits == 1 {
+        if seg.sends == 1 {
             seg.rto = self.rto;
             seg.skip_acks = 0;
-            seg.ts_xmit = self.now + seg.rto;
+            seg.ts_send = self.now + seg.rto;
             if !self.config.nodelay {
-                seg.ts_xmit += self.config.rto_min;
+                seg.ts_send += self.config.rto_min;
             }
-        } else if self.config.fast_rexmit_thres
+        } else if self.config.fast_resend_thres
             .map_or(false, |thres| seg.skip_acks >= thres)
-            && self.config.fast_rexmit_limit
-                .map_or(true, |limit| seg.xmits <= limit)
+            && self.config.fast_resend_limit
+                .map_or(true, |limit| seg.sends <= limit)
         {
             // Fast retransmission
             seg.skip_acks = 0;
-            seg.ts_xmit = self.now + seg.rto;
+            seg.ts_send = self.now + seg.rto;
         } else {
             // Regular retransmission
             seg.rto = if self.config.nodelay {
@@ -751,14 +760,14 @@ impl ControlBlock {
                 // Increase RTO by 1.5x, better than 2x in TCP
                 seg.rto + seg.rto / 2
             };
-            seg.ts_xmit = self.now + seg.rto;
+            seg.ts_send = self.now + seg.rto;
         }
     }
 
-    #[instrument]
+    #[instrument(level = "trace", name = "kcp flush push", skip(self))]
     fn flush_push(&mut self) {
         let limit = self.calc_bbr_limit();
-        debug!(conv = self.conv, limit = limit);
+        // debug!(conv = self.conv, limit = limit);
         let cwnd = min(self.config.send_wnd, self.rmt_wnd);
         while self.send_nxt < self.send_una + cwnd as u32
             && !self.send_queue.is_empty()
@@ -768,7 +777,7 @@ impl ControlBlock {
             seg.sn = self.send_nxt;
             self.send_nxt += 1;
             self.inflight += seg.payload.len() + OVERHEAD as usize;
-            seg.ts_xmit = self.now;
+            seg.ts_send = self.now;
             self.timer.schedule(self.now, seg.sn);
             self.send_buf.push(seg.sn as usize, seg);
             if self.inflight <= limit && self.send_queue.is_empty() {
@@ -782,12 +791,12 @@ impl ControlBlock {
                 continue;
             }
             if let Some(seg) = send_buf.get_mut(sn as usize) {
-                if ts == seg.ts_xmit {
-                    self.prepare_xmit(seg);
-                    self.dead_link |= seg.xmits >= self.config.dead_link_thres;
+                if ts == seg.ts_send {
+                    self.prepare_send(seg);
+                    self.dead_link |= seg.sends >= self.config.dead_link_thres;
                     self.flush_segment(Command::Push, seg.frg, seg.sn, seg.ts, seg.payload.len());
                     self.buffer.extend_from_slice(&seg.payload);
-                    self.timer.schedule(seg.ts_xmit, seg.sn);
+                    self.timer.schedule(seg.ts_send, seg.sn);
                 }
             }
         }
@@ -797,7 +806,7 @@ impl ControlBlock {
     /// Flushes packets from the [send queue](#structfield.send_queue) to the
     /// [send buffer](#structfield.send_buf), and (re)transmits the packets in the send buffer
     /// if necessary.
-    #[instrument]
+    #[instrument(level = "trace", name = "kcp flush", skip(self))]
     pub fn flush(&mut self) {
         self.sync_now();
         self.flush_probe();
@@ -826,8 +835,8 @@ impl ControlBlock {
     pub fn check(&self) -> Instant {
         let now = self.epoch.elapsed().as_millis() as u32;
         let next_flush = min(now + self.config.interval, self.ts_flush);
-        let next_xmit = max(now, self.timer.imminent());
-        Instant::now() + Duration::from_millis(min(next_flush, next_xmit) as u64)
+        let next_send = max(now, self.timer.imminent());
+        Instant::now() + Duration::from_millis(min(next_flush, next_send) as u64)
     }
 
     fn sync_now(&mut self) {

@@ -22,6 +22,7 @@ use std::num::Wrapping;
 use std::thread;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
+use tracing::debug_span;
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
 pub struct IcmpEndpoint {
@@ -119,12 +120,16 @@ fn send_loop(mut tx: TransportSender) {
     let mut receiver = TX_CHANNEL.1.lock();
     loop {
         let result = if resend {
+            let span = debug_span!("icmp resend");
+            let _enter = span.enter();
             tx.send_to(
                 IcmpPacket::new(&buf[..len]).unwrap(),
                 IpAddr::from(last_dst.ip),
             )
         } else {
             let (dst, data) = receiver.blocking_recv().unwrap();
+            let span = debug_span!("icmp resend");
+            let _enter = span.enter();
             len = IcmpPacket::minimum_packet_size() + 4 + data.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
             packet.set_icmp_type(code);

@@ -41,7 +41,8 @@ use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
-use tracing::{debug_span, error, info, instrument, Instrument};
+use tracing::{debug_span, error, info, instrument};
+use tracing_futures::Instrument;
 
 type Control = (Mutex<ControlBlock>, Notify);
 
@@ -131,7 +132,7 @@ impl Session {
         INCOMING.1.lock().await.recv().await.unwrap()
     }
 
-    #[instrument]
+    #[instrument(name = "session send")]
     pub async fn send(&self, buf: &[u8]) {
         loop {
             {
@@ -148,7 +149,7 @@ impl Session {
         }
     }
 
-    #[instrument]
+    #[instrument(name = "session recv")]
     pub async fn recv(&self) -> Vec<u8> {
         loop {
             {

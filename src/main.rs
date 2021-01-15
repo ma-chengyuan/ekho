@@ -9,23 +9,21 @@ use anyhow::Result;
 use std::env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use tracing::{info};
+use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-fn setup_subscriber() -> Result<()> {
-    // let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::Layer::default())
-        // .with(flame_layer)
-        .with(tracing_opentelemetry::layer())
-        .init();
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_subscriber()?;
+    let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
+    // let (tracer, _uninstall) = opentelemetry_jaeger::new_pipeline()
+    //     .with_service_name("ekho")
+    //     .install()?;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::Layer::default())
+        .with(flame_layer)
+        // .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
 
     let config_path = env::args()
         .nth(1)
