@@ -1,8 +1,27 @@
+/*
+Copyright 2021 Chengyuan Ma
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sub-
+-license, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-
+-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::if_same_then_else)]
 
-use crate::config::get_config;
+use crate::config::config;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use parking_lot::Mutex as SyncMutex;
@@ -115,7 +134,7 @@ fn send_loop(mut tx: TransportSender) {
     let mut resend = false;
     let mut len = 0usize;
     let mut seq: FxHashMap<IcmpEndpoint, u16> = FxHashMap::default();
-    let code = match get_config().remote {
+    let code = match config().remote {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
     };

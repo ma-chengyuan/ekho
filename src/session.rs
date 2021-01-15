@@ -1,5 +1,5 @@
 /*
-Copyright 2020 Chengyuan Ma
+Copyright 2021 Chengyuan Ma
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
 associated documentation files (the "Software"), to deal in the Software without restriction,
@@ -20,15 +20,16 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //! Build sessions above the raw KCP algorithm
 
 #![allow(dead_code)]
-use crate::config::get_config;
+use crate::config::config;
 use crate::icmp::IcmpEndpoint;
 
-use crate::kcp::{dissect_headers_from_raw, ControlBlock, Error};
+use crate::kcp::{ControlBlock, Error};
 use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
+use rand::{thread_rng, Rng};
 use rustc_hash::FxHasher;
 use std::fmt;
 use std::hash::BuildHasherDefault;
@@ -40,8 +41,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
-use tracing::{debug_span, error, instrument};
+use tokio::time::{interval, sleep, Duration};
+use tracing::{debug_span, debug, error, instrument};
 use tracing_futures::Instrument;
 
 type Control = (Mutex<ControlBlock>, Notify);
@@ -49,7 +50,7 @@ type Control = (Mutex<ControlBlock>, Notify);
 lazy_static! {
     static ref CONTROLS: DashMap<(IcmpEndpoint, u32), Weak<Control>, BuildHasherDefault<FxHasher>> =
         Default::default();
-    static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&get_config().key);
+    static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&config().key);
     static ref NONCE: Nonce = Nonce::default();
     static ref INCOMING: (
         UnboundedSender<Session>,
@@ -78,7 +79,7 @@ impl Session {
         assert!(!CONTROLS.contains_key(&(peer, conv)));
         // The naming here is very nasty!
         let control = Arc::new((
-            Mutex::new(ControlBlock::new(conv, get_config().kcp.clone())),
+            Mutex::new(ControlBlock::new(conv, config().kcp.clone())),
             Notify::new(),
         ));
         let control_cloned = control.clone();
@@ -87,37 +88,32 @@ impl Session {
         let local_closing = Arc::new(AtomicBool::new(false));
         let peer_closing_cloned = peer_closing.clone();
         let local_closing_cloned = local_closing.clone();
-        let updater = task::spawn(
-            async move {
-                let icmp_tx = crate::icmp::clone_sender().await;
-                let interval = Duration::from_millis(get_config().kcp.interval as u64);
-                'update_loop: loop {
-                    {
-                        let mut kcp = control_cloned.0.lock();
-                        kcp.flush();
-                        control_cloned.1.notify_waiters();
-                        while let Some(mut raw) = kcp.output() {
-                            // dissect_headers_from_raw(&raw, "send");
-                            if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
-                                icmp_tx.send((peer, raw)).unwrap();
-                            } else {
-                                error!("error encrypting block");
-                                break 'update_loop;
-                            }
-                        }
-                        let peer_closing = peer_closing_cloned.load(Ordering::SeqCst);
-                        let local_closing = local_closing_cloned.load(Ordering::SeqCst);
-                        if kcp.dead_link() || peer_closing && local_closing && kcp.all_flushed() {
-                            break;
+        let updater = task::spawn(async move {
+            let icmp_tx = crate::icmp::clone_sender().await;
+            let mut interval = interval(Duration::from_millis(config().kcp.interval as u64));
+            'update_loop: loop {
+                {
+                    interval.tick().await;
+                    let mut kcp = control_cloned.0.lock();
+                    kcp.flush();
+                    control_cloned.1.notify_waiters();
+                    while let Some(mut raw) = kcp.output() {
+                        // dissect_headers_from_raw(&raw, "send");
+                        if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
+                            icmp_tx.send((peer, raw)).unwrap();
+                        } else {
+                            error!("error encrypting block");
+                            break 'update_loop;
                         }
                     }
-                    sleep(interval)
-                        .instrument(debug_span!("kcp_update_interval"))
-                        .await;
+                    let peer_closing = peer_closing_cloned.load(Ordering::SeqCst);
+                    let local_closing = local_closing_cloned.load(Ordering::SeqCst);
+                    if kcp.dead_link() || peer_closing && local_closing && kcp.all_flushed() {
+                        break;
+                    }
                 }
             }
-            .instrument(debug_span!("update_loop")),
-        );
+        });
         Session {
             conv,
             peer,
@@ -125,6 +121,15 @@ impl Session {
             updater,
             peer_closing,
             local_closing,
+        }
+    }
+
+    pub fn connect(peer: IcmpEndpoint) -> Self {
+        loop {
+            let conv = thread_rng().gen();
+            if !CONTROLS.contains_key(&(peer, conv)) {
+                return Session::new(peer, conv);
+            }
         }
     }
 
@@ -180,6 +185,7 @@ impl Session {
                 self.updater.await.unwrap();
             } => {}
         }
+        debug!("connection closed, {} left", CONTROLS.len());
     }
 }
 
@@ -191,12 +197,14 @@ impl fmt::Debug for Session {
 
 #[instrument]
 async fn recv_loop() {
+    let sender = crate::icmp::clone_sender().await;
     loop {
         let (from, mut raw) = crate::icmp::receive_packet()
             .instrument(debug_span!("receive_icmp_packet"))
             .await;
         if CIPHER.decrypt_in_place(&NONCE, b"", &mut raw).is_err() {
-            // TODO: mimic normal ping behavior
+            // Mimic real ping behavior
+            sender.send((from, raw)).unwrap();
             continue;
         }
         let conv = crate::kcp::conv_from_raw(&raw);

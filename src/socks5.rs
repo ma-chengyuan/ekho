@@ -1,9 +1,29 @@
+/*
+Copyright 2021 Chengyuan Ma
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sub-
+-license, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-
+-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{Error, ErrorKind};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use thiserror::Error;
+use tokio::net::{TcpStream};
 
 pub const SOCKS5_VERSION: u8 = 0x05;
 const ATYP_IPV4: u8 = 0x01;
@@ -21,6 +41,8 @@ pub enum Socks5ParseError {
     #[error("invalid error code: {0}")]
     InvalidErrorCode(u8),
 }
+
+type Result<T> = std::result::Result<T, Socks5ParseError>;
 
 #[derive(Debug, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
@@ -63,10 +85,8 @@ pub enum Socks5Addr {
     Hostname(String),
 }
 
-impl TryFrom<&[u8]> for Socks5Addr {
-    type Error = Socks5ParseError;
-
-    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+impl Socks5Addr {
+    pub fn parse(buf: &[u8]) -> Result<Self> {
         if buf.is_empty() {
             return Err(Socks5ParseError::InvalidLength);
         }
@@ -88,12 +108,10 @@ impl TryFrom<&[u8]> for Socks5Addr {
         }
         Ok(ret)
     }
-}
 
-impl From<&Socks5Addr> for Vec<u8> {
-    fn from(addr: &Socks5Addr) -> Self {
+    pub fn marshal(&self) -> Vec<u8> {
         let mut ret: Vec<u8>;
-        match addr {
+        match self {
             Socks5Addr::Ip(IpAddr::V4(ipv4)) => {
                 ret = Vec::with_capacity(5);
                 ret.push(ATYP_IPV4);
@@ -131,33 +149,30 @@ pub struct Socks5SocketAddr {
     pub port: u16,
 }
 
-impl TryFrom<&[u8]> for Socks5SocketAddr {
-    type Error = Socks5ParseError;
-
-    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+impl Socks5SocketAddr {
+    pub fn parse(buf: &[u8]) -> Result<Self> {
         if buf.len() < 2 {
             return Err(Socks5ParseError::InvalidLength);
         }
         Ok(Socks5SocketAddr {
-            addr: Socks5Addr::try_from(&buf[..buf.len() - 2])?,
+            addr: Socks5Addr::parse(&buf[..buf.len() - 2])?,
             port: u16::from_be_bytes(buf[buf.len() - 2..].try_into().unwrap()),
         })
     }
-}
 
-impl From<&Socks5SocketAddr> for Vec<u8> {
-    fn from(socket_addr: &Socks5SocketAddr) -> Self {
-        let mut ret: Vec<u8> = (&socket_addr.addr).into();
-        ret.extend(&socket_addr.port.to_be_bytes());
+    pub fn marshal(&self) -> Vec<u8> {
+        let mut ret: Vec<u8> = self.addr.marshal();
+        ret.extend(&self.port.to_be_bytes());
         ret
     }
-}
 
-impl ToSocketAddrs for Socks5SocketAddr {
-    type Iter = std::vec::IntoIter<SocketAddr>;
-
-    fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
-        (self.addr.to_string(), self.port).to_socket_addrs()
+    pub async fn connect(&self) -> tokio::io::Result<TcpStream> {
+        match &self.addr {
+            Socks5Addr::Ip(ip) => TcpStream::connect((*ip, self.port)).await,
+            Socks5Addr::Hostname(hostname) => {
+                TcpStream::connect((hostname.as_str(), self.port)).await
+            }
+        }
     }
 }
 
@@ -182,10 +197,8 @@ pub struct Socks5Request {
     pub dst: Socks5SocketAddr,
 }
 
-impl TryFrom<&[u8]> for Socks5Request {
-    type Error = Socks5ParseError;
-
-    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+impl Socks5Request {
+    pub fn parse(buf: &[u8]) -> Result<Self> {
         if buf.len() <= 3 {
             return Err(Socks5ParseError::InvalidLength);
         }
@@ -195,15 +208,13 @@ impl TryFrom<&[u8]> for Socks5Request {
         Ok(Socks5Request {
             cmd: Socks5Command::try_from(buf[1])
                 .map_err(|_| Socks5ParseError::InvalidCommand(buf[1]))?,
-            dst: Socks5SocketAddr::try_from(&buf[3..])?,
+            dst: Socks5SocketAddr::parse(&buf[3..])?,
         })
     }
-}
 
-impl From<&Socks5Request> for Vec<u8> {
-    fn from(request: &Socks5Request) -> Self {
-        let mut ret = vec![SOCKS5_VERSION, request.cmd.into(), 0];
-        ret.extend(Vec::<u8>::from(&request.dst));
+    pub fn marshal(&self) -> Vec<u8> {
+        let mut ret = vec![SOCKS5_VERSION, self.cmd.into(), 0];
+        ret.extend(self.dst.marshal());
         ret
     }
 }
@@ -214,10 +225,8 @@ pub enum Socks5Reply {
     Success { bnd: Socks5SocketAddr },
 }
 
-impl TryFrom<&[u8]> for Socks5Reply {
-    type Error = Socks5ParseError;
-
-    fn try_from(buf: &[u8]) -> Result<Self, Socks5ParseError> {
+impl Socks5Reply {
+    pub fn parse(buf: &[u8]) -> Result<Self> {
         if buf.len() <= 3 {
             return Err(Socks5ParseError::InvalidLength);
         }
@@ -226,7 +235,7 @@ impl TryFrom<&[u8]> for Socks5Reply {
         }
         Ok(if buf[1] == 0 {
             Socks5Reply::Success {
-                bnd: Socks5SocketAddr::try_from(&buf[3..])?,
+                bnd: Socks5SocketAddr::parse(&buf[3..])?,
             }
         } else {
             Socks5Reply::Error(
@@ -235,17 +244,15 @@ impl TryFrom<&[u8]> for Socks5Reply {
             )
         })
     }
-}
 
-impl From<&Socks5Reply> for Vec<u8> {
-    fn from(reply: &Socks5Reply) -> Self {
-        match reply {
+    pub fn marshal(&self) -> Vec<u8> {
+        match self {
             Socks5Reply::Error(code) => {
                 vec![SOCKS5_VERSION, (*code).into(), 0, 0x01, 0, 0, 0, 0, 0, 0]
             }
             Socks5Reply::Success { bnd } => {
                 let mut ret = vec![SOCKS5_VERSION, 0, 0];
-                ret.append(&mut Vec::<u8>::from(bnd));
+                ret.extend(bnd.marshal());
                 ret
             }
         }
@@ -258,10 +265,8 @@ pub struct Socks5UdpEncapsulation {
     pub data: Vec<u8>,
 }
 
-impl TryFrom<&[u8]> for Socks5UdpEncapsulation {
-    type Error = Socks5ParseError;
-
-    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+impl Socks5UdpEncapsulation {
+    pub fn parse(buf: &[u8]) -> Result<Self> {
         if buf.len() <= 4 {
             return Err(Socks5ParseError::InvalidLength);
         }
@@ -272,17 +277,15 @@ impl TryFrom<&[u8]> for Socks5UdpEncapsulation {
             ATYP_DOMAIN_NAME => buf[4] as usize + 2,
             _ => return Err(Socks5ParseError::InvalidLength),
         };
-        let dst = Socks5SocketAddr::try_from(&buf[3..3 + addr_len])?;
+        let dst = Socks5SocketAddr::parse(&buf[3..3 + addr_len])?;
         let data = Vec::from(&buf[3 + addr_len..]);
         Ok(Socks5UdpEncapsulation { frag, dst, data })
     }
-}
 
-impl From<&Socks5UdpEncapsulation> for Vec<u8> {
-    fn from(udp: &Socks5UdpEncapsulation) -> Self {
-        let mut ret = vec![0, 0, udp.frag];
-        ret.extend(Vec::<u8>::from(&udp.dst));
-        ret.extend(&udp.data);
+    pub fn marshal(&self) -> Vec<u8> {
+        let mut ret = vec![0, 0, self.frag];
+        ret.extend(self.dst.marshal());
+        ret.extend(&self.data);
         ret
     }
 }

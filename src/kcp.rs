@@ -1,5 +1,5 @@
 /*
-Copyright 2020 Chengyuan Ma
+Copyright 2021 Chengyuan Ma
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
 associated documentation files (the "Software"), to deal in the Software without restriction,
@@ -38,10 +38,10 @@ use serde::Deserialize;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::convert::TryInto;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use thiserror::Error;
 use timer::Timer;
-use tracing::{debug, instrument};
+use tracing::instrument;
 use window::Window;
 
 /// KCP error type.
@@ -675,6 +675,7 @@ impl ControlBlock {
         }
     }
 
+    /// Flushes a segment header
     fn flush_segment(&mut self, cmd: Command, frg: u8, sn: u32, ts: u32, len: usize) {
         let wnd = self
             .config
@@ -768,6 +769,8 @@ impl ControlBlock {
         }
     }
 
+    /// Attempts to pull enqueued send segments into the send buffer, and to (re)transmit them if ne
+    /// cessary
     #[instrument(level = "trace", skip(self))]
     fn flush_push(&mut self) {
         let limit = self.calc_bbr_limit();
@@ -889,24 +892,4 @@ pub fn first_push_packet(mut buf: &[u8]) -> bool {
         buf = &buf[len..];
     }
     true
-}
-
-/// Print the headers of the packets in the given raw buffer `buf` using `log::debug!(...)`
-pub fn dissect_headers_from_raw(mut buf: &[u8], prefix: &'static str) {
-    while buf.len() >= OVERHEAD as usize {
-        let _conv = buf.get_u32_le();
-        let cmd = buf.get_u8();
-        let frg = buf.get_u8();
-        let wnd = buf.get_u16_le();
-        let ts = buf.get_u32_le();
-        let sn = buf.get_u32_le();
-        let una = buf.get_u32_le();
-        let len = buf.get_u32_le() as usize;
-        #[rustfmt::skip]
-        tracing::debug!(
-            "{} {:?}\t\tfrg {:3} wnd {:5} ts {:6} sn {:6} una {:6} len {:8}",
-            prefix, Command::try_from_primitive(cmd).unwrap(), frg, wnd, ts, sn, una, len
-        );
-        buf = &buf[len..];
-    }
 }

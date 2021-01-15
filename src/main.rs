@@ -1,13 +1,34 @@
+/*
+Copyright 2021 Chengyuan Ma
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction,
+including without limitation the rights to use, copy, modify, merge, publish, distribute, sub-
+-license, and/or sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-
+-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
+OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
+mod client;
 mod config;
 mod icmp;
 mod kcp;
+mod relay;
+mod server;
 mod session;
 mod socks5;
 
-use crate::config::get_config;
+use crate::config::config;
 use anyhow::Result;
 use std::env;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
@@ -34,36 +55,11 @@ async fn main() -> Result<()> {
     config::load_config_from_file(config_path).await?;
     icmp::init_send_recv_loop().await?;
     session::init_recv_loop().await;
-    // test_kcp().await;
-    if get_config().remote.is_none() {
-        let session = session::Session::incoming().await;
-        let _greeting = session.recv().await;
-        info!("received session: {:?}", session);
-        let mut file = tokio::fs::File::open("sample").await?;
-        let mut buf = vec![0u8; get_config().kcp.mss()];
-        loop {
-            let len = file.read(&mut buf).await?;
-            if len == 0 {
-                break;
-            }
-            session.send(&buf[..len]).await;
-        }
-        session.close().await;
-        info!("closed");
-    } else {
-        let session = session::Session::new(get_config().remote.unwrap(), 998244353);
-        session.send(b"\0").await;
-        let mut file = tokio::fs::File::create("sample").await?;
-        loop {
-            let data = session.recv().await;
-            if data.is_empty() {
-                break;
-            }
-            file.write_all(&data).await?;
-        }
-        session.close().await;
-        info!("closed");
-    }
 
+    if config().remote.is_some() {
+        client::run().await;
+    } else {
+        server::run().await;
+    }
     Ok(())
 }
