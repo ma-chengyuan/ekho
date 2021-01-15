@@ -87,7 +87,7 @@ enum Command {
 #[derivative(Default)]
 #[serde(default)]
 pub struct Config {
-    #[derivative(Default(value = "1400"))]
+    #[derivative(Default(value = "536"))]
     pub mtu: u32,
     #[derivative(Default(value = "200"))]
     pub rto_default: u32,
@@ -135,7 +135,7 @@ pub struct Config {
     pub probe_rtt_time: u32,
     /// A multiplier than controls the aggressiveness of BBR. To avoid floating point arithmetic
     /// it is 1024-based e.g. set to 1024 for 1.0, 1536 for 1.5, and 2048 for 2.0 etc.
-    #[derivative(Default(value = "1536"))]
+    #[derivative(Default(value = "1024"))]
     pub bdp_gain: usize,
 }
 
@@ -153,6 +153,7 @@ struct Segment {
     frg: u8, ts: u32, sn: u32,
     /// Time for next retransmission
     ts_send: u32,
+    /// Retransmission Timeout
     rto: u32,
     /// Number of times the packet is skip-ACKed.
     skip_acks: u32,
@@ -400,6 +401,7 @@ impl ControlBlock {
             });
             buf = back;
         }
+        self.sync_now();
         self.flush_push();
         Ok(())
     }
@@ -813,39 +815,11 @@ impl ControlBlock {
         self.sync_now();
         self.flush_probe();
         self.flush_push();
-        if self.config.bbr {
-            let rt_prop = self.rt_prop_queue.front().map_or(0, |p| p.1);
-            let btl_bw = self.btl_bw_queue.front().map_or(0, |p| p.1);
-            let limit = self.calc_bbr_limit();
-            debug!("rt_prop {:4}ms btl_bw {:7}KBps limit {:9}B inflight {:9}B state {:?}",
-                   rt_prop, btl_bw, limit, self.inflight, self.bbr_state);
-        }
         if !self.buffer.is_empty() {
             let mut new_buf = Vec::with_capacity(self.config.mtu as usize);
             std::mem::swap(&mut self.buffer, &mut new_buf);
             self.output.push_back(new_buf);
         }
-    }
-
-    /// Sets the internal time to `current` and then updates the whole control block.
-    pub fn update(&mut self) {
-        self.sync_now();
-        if self.ts_flush <= self.now {
-            self.ts_flush += self.config.interval;
-            if self.ts_flush <= self.now {
-                self.ts_flush = self.now + self.config.interval;
-            }
-            self.flush();
-        }
-    }
-
-    /// Checks the next time you should call [update](#method.update) assuming current time is
-    /// `current`.
-    pub fn check(&self) -> Instant {
-        let now = self.epoch.elapsed().as_millis() as u32;
-        let next_flush = min(now + self.config.interval, self.ts_flush);
-        let next_send = max(now, self.timer.imminent());
-        Instant::now() + Duration::from_millis(min(next_flush, next_send) as u64)
     }
 
     fn sync_now(&mut self) {
