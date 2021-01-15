@@ -41,7 +41,7 @@ use std::convert::TryInto;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use timer::Timer;
-use tracing::instrument;
+use tracing::{debug, instrument};
 use window::Window;
 
 /// KCP error type.
@@ -457,7 +457,7 @@ impl ControlBlock {
 
             let btl_bw = (self.delivered - seg.delivered)
                 / max(self.ts_last_ack - seg.ts_last_ack, 1) as usize;
-            if !seg.app_limited || btl_bw > self.btl_bw_queue.front().map(|p| p.1).unwrap_or(0) {
+            if !seg.app_limited || btl_bw > self.btl_bw_queue.front().map_or(0, |p| p.1) {
                 while self.btl_bw_queue.front().map_or(false, |p| {
                     p.0 + self.config.btl_bw_wnd * self.srtt <= self.now
                 }) {
@@ -479,8 +479,10 @@ impl ControlBlock {
         }
         match self.bbr_state {
             BBRState::Startup => {
-                if !self.btl_bw_queue.is_empty()
-                    && self.btl_bw_queue.front().unwrap().0 + 3 * self.srtt <= self.now
+                if self
+                    .btl_bw_queue
+                    .front()
+                    .map_or(false, |p| p.0 + 3 * self.srtt <= self.now)
                 {
                     // Bottle neck bandwidth has not been updated in 3 RTTs, indicating that the pipe
                     // is filled and we have probe the bandwidth, enter drain
@@ -811,6 +813,11 @@ impl ControlBlock {
         self.sync_now();
         self.flush_probe();
         self.flush_push();
+        if self.config.bbr {
+            let rt_prop = self.rt_prop_queue.front().map_or(0, |p| p.1);
+            let btl_bw = self.btl_bw_queue.front().map_or(0, |p| p.1);
+            debug!("rt_prop {:4} btl_bw {:8}", rt_prop, btl_bw);
+        }
         if !self.buffer.is_empty() {
             let mut new_buf = Vec::with_capacity(self.config.mtu as usize);
             std::mem::swap(&mut self.buffer, &mut new_buf);
