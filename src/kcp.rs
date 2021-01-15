@@ -816,7 +816,7 @@ impl ControlBlock {
         if self.config.bbr {
             let rt_prop = self.rt_prop_queue.front().map_or(0, |p| p.1);
             let btl_bw = self.btl_bw_queue.front().map_or(0, |p| p.1);
-            debug!("rt_prop {:4} btl_bw {:8}", rt_prop, btl_bw);
+            debug!("rt_prop {:4} btl_bw {:7} state {:?}", rt_prop, btl_bw, self.bbr_state);
         }
         if !self.buffer.is_empty() {
             let mut new_buf = Vec::with_capacity(self.config.mtu as usize);
