@@ -41,7 +41,7 @@ use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
-use tracing::{debug_span, error, info, instrument};
+use tracing::{debug_span, error, instrument};
 use tracing_futures::Instrument;
 
 type Control = (Mutex<ControlBlock>, Notify);
@@ -112,7 +112,7 @@ impl Session {
                         }
                     }
                     sleep(interval)
-                        .instrument(debug_span!("kcp update interval"))
+                        .instrument(debug_span!("kcp_update_interval"))
                         .await;
                 }
             }
@@ -132,7 +132,7 @@ impl Session {
         INCOMING.1.lock().await.recv().await.unwrap()
     }
 
-    #[instrument(name = "session send")]
+    #[instrument]
     pub async fn send(&self, buf: &[u8]) {
         loop {
             {
@@ -149,7 +149,7 @@ impl Session {
         }
     }
 
-    #[instrument(name = "session recv")]
+    #[instrument]
     pub async fn recv(&self) -> Vec<u8> {
         loop {
             {

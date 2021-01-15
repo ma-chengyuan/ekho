@@ -22,7 +22,7 @@ use std::num::Wrapping;
 use std::thread;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tracing::debug_span;
+use tracing::{debug_span, instrument};
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
 pub struct IcmpEndpoint {
@@ -81,11 +81,16 @@ pub async fn init_send_recv_loop() -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip(rx))]
 fn recv_loop(mut rx: TransportReceiver) {
     let mut iter = icmp_packet_iter(&mut rx);
     let sender = RX_CHANNEL.0.lock();
     loop {
-        let (packet, addr) = iter.next().expect("error receiving ICMP packet");
+        let (packet, addr) = {
+            let span = debug_span!("icmp_recv");
+            let _enter = span.enter();
+            iter.next().expect("error receiving ICMP packet")
+        };
         if let IpAddr::V4(ipv4) = addr {
             if platform_impl::filter_local_ip(ipv4) {
                 let payload = packet.payload();
@@ -104,6 +109,7 @@ fn recv_loop(mut rx: TransportReceiver) {
     }
 }
 
+#[instrument(skip(tx))]
 fn send_loop(mut tx: TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
     let mut resend = false;
@@ -120,15 +126,19 @@ fn send_loop(mut tx: TransportSender) {
     let mut receiver = TX_CHANNEL.1.lock();
     loop {
         let result = if resend {
-            let span = debug_span!("icmp resend");
+            let span = debug_span!("icmp_resend");
             let _enter = span.enter();
             tx.send_to(
                 IcmpPacket::new(&buf[..len]).unwrap(),
                 IpAddr::from(last_dst.ip),
             )
         } else {
-            let (dst, data) = receiver.blocking_recv().unwrap();
-            let span = debug_span!("icmp resend");
+            let (dst, data) = {
+                let span = debug_span!("icmp_blocking_recv");
+                let _enter = span.enter();
+                receiver.blocking_recv().unwrap()
+            };
+            let span = debug_span!("icmp_send");
             let _enter = span.enter();
             len = IcmpPacket::minimum_packet_size() + 4 + data.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
