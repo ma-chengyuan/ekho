@@ -33,6 +33,7 @@ use std::env;
 use tracing::info;
 use tracing::Level;
 use tracing_subscriber::util::SubscriberInitExt;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 fn setep_subscriber() {
     // let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
@@ -61,9 +62,33 @@ async fn main() -> Result<()> {
     session::init_dispatch_loop().await;
 
     if config().remote.is_some() {
-        client::run().await;
+        let session = session::Session::new(config().remote.unwrap(), 998244353);
+        session.send(b"\0").await;
+        let mut file = tokio::fs::File::create("sample").await?;
+        loop {
+            let data = session.recv().await;
+            if data.is_empty() {
+                break;
+            }
+            file.write_all(&data).await?;
+        }
+        session.close().await;
+        info!("closed");
     } else {
-        server::run().await;
+        let session = session::Session::incoming().await;
+        let _greeting = session.recv().await;
+        info!("received session: {:?}", session);
+        let mut file = tokio::fs::File::open("sample").await?;
+        let mut buf = vec![0u8; config().kcp.mss()];
+        loop {
+            let len = file.read(&mut buf).await?;
+            if len == 0 {
+                break;
+            }
+            session.send(&buf[..len]).await;
+        }
+        session.close().await;
+        info!("closed");
     }
     Ok(())
 }
