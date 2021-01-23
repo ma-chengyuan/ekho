@@ -110,7 +110,7 @@ async fn handle_socks(mut local: TcpStream) -> Result<()> {
 }
 
 pub fn connect_directly(_addr: &Socks5SocketAddr) -> bool {
-    true
+    false
 }
 
 #[instrument]

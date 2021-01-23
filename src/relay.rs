@@ -83,6 +83,9 @@ async fn forward_tcp_to_kcp<'a>(mut from: ReadHalf<'a>, to: &Session) -> Result<
 async fn forward_kcp_to_tcp<'a>(from: &Session, mut to: WriteHalf<'a>) -> Result<()> {
     loop {
         let buf = from.recv().await;
+        if buf.is_empty() {
+            break;
+        }
         match to.write_all(&buf).await {
             Ok(()) => break,
             Err(err) if err.kind() == ErrorKind::ConnectionAborted => break,
@@ -95,8 +98,8 @@ async fn forward_kcp_to_tcp<'a>(from: &Session, mut to: WriteHalf<'a>) -> Result
 pub async fn relay_kcp(mut tcp: TcpStream, session: Session) -> Result<()> {
     let (read, write) = tcp.split();
     let res = select! {
-        res = forward_tcp_to_kcp(read, &session) => res,
-        res = forward_kcp_to_tcp(&session, write) => res
+        res = forward_tcp_to_kcp(read, &session) => { info!("relay closed local"); res },
+        res = forward_kcp_to_tcp(&session, write) => { info!("relay closed remote"); res }
     };
     session.close().await;
     res
