@@ -42,7 +42,7 @@ use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, Duration};
-use tracing::{debug_span, error, instrument};
+use tracing::{debug, debug_span, error, instrument};
 use tracing_futures::Instrument;
 
 type Control = (Mutex<ControlBlock>, Notify);
@@ -184,6 +184,7 @@ impl Session {
                 }
                 self.updater.await.unwrap();
                 CONTROLS.remove(&(self.peer, self.conv));
+                debug!("session closed, {} remaining", CONTROLS.len());
             } => {}
         }
     }
