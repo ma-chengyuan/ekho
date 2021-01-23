@@ -42,7 +42,7 @@ use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, Duration};
-use tracing::{debug_span, debug, error, instrument};
+use tracing::{debug_span, error, instrument};
 use tracing_futures::Instrument;
 
 type Control = (Mutex<ControlBlock>, Notify);
@@ -183,9 +183,9 @@ impl Session {
                     let _discarded = self.recv().await;
                 }
                 self.updater.await.unwrap();
+                CONTROLS.remove(&(self.peer, self.conv));
             } => {}
         }
-        debug!("connection closed, {} left", CONTROLS.len());
     }
 }
 
@@ -196,7 +196,7 @@ impl fmt::Debug for Session {
 }
 
 #[instrument]
-async fn recv_loop() {
+async fn dispatch_loop() {
     let sender = crate::icmp::clone_sender().await;
     loop {
         let (from, mut raw) = crate::icmp::receive_packet()
@@ -224,6 +224,6 @@ async fn recv_loop() {
     }
 }
 
-pub async fn init_recv_loop() {
-    task::spawn(recv_loop());
+pub async fn init_dispatch_loop() {
+    task::spawn(dispatch_loop());
 }

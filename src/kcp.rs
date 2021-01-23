@@ -151,8 +151,6 @@ impl Config {
 #[rustfmt::skip]
 struct Segment {
     frg: u8, ts: u32, sn: u32,
-    /// Time for next retransmission
-    ts_send: u32,
     /// Retransmission Timeout
     rto: u32,
     /// Number of times the packet is skip-ACKed.
@@ -233,6 +231,8 @@ pub struct ControlBlock {
     /// The instant of the creation of the control block
     #[derivative(Debug = "ignore")]
     epoch: Instant,
+    #[derivative(Debug = "ignore")]
+    acks: VecDeque<(u32, u32)>,
 
     /// Time of receiving the last ACK packet.
     ts_last_ack: u32,
@@ -297,6 +297,7 @@ impl ControlBlock {
             output: Default::default(),
             buffer: Vec::with_capacity(config.mtu as usize),
             epoch: Instant::now(),
+            acks: Default::default(),
 
             delivered: 0,
             ts_last_ack: 0,
@@ -553,7 +554,7 @@ impl ControlBlock {
                 if fast_resend_thres.map_or(false, |thres| seg.skip_acks == thres)
                     && fast_resend_limit.map_or(true, |limit| seg.sends <= limit)
                 {
-                    seg.ts_send = now;
+                    seg.ts = now;
                     timer.schedule(now, seg.sn);
                 }
             });
@@ -623,7 +624,7 @@ impl ControlBlock {
                 }
                 Command::Push => {
                     if sn < self.recv_nxt + self.config.recv_wnd as u32 {
-                        self.flush_segment(Command::Ack, 0, sn, ts, 0);
+                        self.acks.push_back((sn, ts));
                         if sn >= self.recv_nxt {
                             self.push_segment(Segment {
                                 sn,
@@ -735,7 +736,7 @@ impl ControlBlock {
 
     /// Prepare a segment for (re)transmission
     #[rustfmt::skip]
-    fn prepare_send(&self, seg: &mut Segment) {
+    fn prepare_send(&self, seg: &mut Segment) -> u32 {
         seg.sends += 1;
         seg.ts = self.now;
         seg.delivered = self.delivered;
@@ -745,9 +746,10 @@ impl ControlBlock {
         if seg.sends == 1 {
             seg.rto = self.rto;
             seg.skip_acks = 0;
-            seg.ts_send = self.now + seg.rto;
-            if !self.config.nodelay {
-                seg.ts_send += self.config.rto_min;
+            if self.config.nodelay {
+                self.now + seg.rto
+            } else {
+                self.now + seg.rto + self.config.rto_min
             }
         } else if self.config.fast_resend_thres
             .map_or(false, |thres| seg.skip_acks >= thres)
@@ -756,7 +758,7 @@ impl ControlBlock {
         {
             // Fast retransmission
             seg.skip_acks = 0;
-            seg.ts_send = self.now + seg.rto;
+            self.now + seg.rto
         } else {
             // Regular retransmission
             seg.rto = if self.config.nodelay {
@@ -765,7 +767,7 @@ impl ControlBlock {
                 // Increase RTO by 1.5x, better than 2x in TCP
                 seg.rto + seg.rto / 2
             };
-            seg.ts_send = self.now + seg.rto;
+            self.now + seg.rto
         }
     }
 
@@ -784,7 +786,7 @@ impl ControlBlock {
             seg.sn = self.send_nxt;
             self.send_nxt += 1;
             self.inflight += seg.payload.len() + OVERHEAD as usize;
-            seg.ts_send = self.now;
+            seg.ts = self.now;
             self.timer.schedule(self.now, seg.sn);
             self.send_buf.push(seg.sn as usize, seg);
             if self.inflight <= limit && self.send_queue.is_empty() {
@@ -798,16 +800,22 @@ impl ControlBlock {
                 continue;
             }
             if let Some(seg) = send_buf.get_mut(sn as usize) {
-                if ts == seg.ts_send {
-                    self.prepare_send(seg);
+                if ts == seg.ts {
+                    seg.ts = self.prepare_send(seg);
                     self.dead_link |= seg.sends >= self.config.dead_link_thres;
-                    self.flush_segment(Command::Push, seg.frg, seg.sn, seg.ts, seg.payload.len());
+                    self.flush_segment(Command::Push, seg.frg, seg.sn, ts, seg.payload.len());
                     self.buffer.extend_from_slice(&seg.payload);
-                    self.timer.schedule(seg.ts_send, seg.sn);
+                    self.timer.schedule(seg.ts, seg.sn);
                 }
             }
         }
         self.send_buf = send_buf;
+    }
+
+    fn flush_ack(&mut self) {
+        for (sn, ts) in std::mem::take(&mut self.acks) {
+            self.flush_segment(Command::Ack, 0, sn, ts, 0);
+        }
     }
 
     /// Flushes packets from the [send queue](#structfield.send_queue) to the
@@ -818,6 +826,7 @@ impl ControlBlock {
         self.sync_now();
         self.flush_probe();
         self.flush_push();
+        self.flush_ack();
         if !self.buffer.is_empty() {
             let mut new_buf = Vec::with_capacity(self.config.mtu as usize);
             std::mem::swap(&mut self.buffer, &mut new_buf);

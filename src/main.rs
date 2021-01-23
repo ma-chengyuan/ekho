@@ -31,21 +31,25 @@ use anyhow::Result;
 use std::env;
 
 use tracing::info;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing::Level;
 use tracing_subscriber::util::SubscriberInitExt;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
+fn setep_subscriber() {
+    // let (flame_layer, _guard) = tracing_flame::FlameLayer::with_file("./tracing.folded")?;
     // let (tracer, _uninstall) = opentelemetry_jaeger::new_pipeline()
     //     .with_service_name("ekho")
     //     .install()?;
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::Layer::default())
-        .with(flame_layer)
-        // .with(tracing_opentelemetry::layer().with_tracer(tracer))
-        .init();
+    let fmt_subscriber = tracing_subscriber::fmt::fmt()
+        .with_max_level(Level::DEBUG)
+        .compact()
+        .finish();
+    fmt_subscriber.init();
+    // Ok(_guard)
+}
 
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _guard = setep_subscriber();
     let config_path = env::args()
         .nth(1)
         .unwrap_or_else(|| String::from("config.toml"));
@@ -54,7 +58,7 @@ async fn main() -> Result<()> {
 
     config::load_config_from_file(config_path).await?;
     icmp::init_send_recv_loop().await?;
-    session::init_recv_loop().await;
+    session::init_dispatch_loop().await;
 
     if config().remote.is_some() {
         client::run().await;

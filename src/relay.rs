@@ -27,7 +27,7 @@ use tokio::io::{Error, ErrorKind};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::select;
-use tracing::{info, instrument};
+use tracing::info;
 
 fn handle_io_error(err: Error) -> Result<()> {
     if matches!(
@@ -41,7 +41,6 @@ fn handle_io_error(err: Error) -> Result<()> {
     }
 }
 
-#[instrument]
 async fn forward_tcp<'a>(mut from: ReadHalf<'a>, mut to: WriteHalf<'a>) -> Result<()> {
     let mut buf = [0; 1024];
     loop {
@@ -54,9 +53,12 @@ async fn forward_tcp<'a>(mut from: ReadHalf<'a>, mut to: WriteHalf<'a>) -> Resul
     Ok(())
 }
 
-#[instrument]
 pub async fn relay_tcp(mut a: TcpStream, mut b: TcpStream) -> Result<()> {
-    info!("relaying between {:?} and {:?}", a, b);
+    info!(
+        "relaying between {:?} and {:?}",
+        a.peer_addr()?,
+        b.peer_addr()?
+    );
     let (a_read, a_write) = a.split();
     let (b_read, b_write) = b.split();
     select! {
@@ -65,7 +67,6 @@ pub async fn relay_tcp(mut a: TcpStream, mut b: TcpStream) -> Result<()> {
     }
 }
 
-#[instrument]
 async fn forward_tcp_to_kcp<'a>(mut from: ReadHalf<'a>, to: &Session) -> Result<()> {
     let mut buf = vec![0; config().kcp.mss()];
     loop {
@@ -79,7 +80,6 @@ async fn forward_tcp_to_kcp<'a>(mut from: ReadHalf<'a>, to: &Session) -> Result<
     Ok(())
 }
 
-#[instrument]
 async fn forward_kcp_to_tcp<'a>(from: &Session, mut to: WriteHalf<'a>) -> Result<()> {
     loop {
         let buf = from.recv().await;
@@ -92,7 +92,6 @@ async fn forward_kcp_to_tcp<'a>(from: &Session, mut to: WriteHalf<'a>) -> Result
     Ok(())
 }
 
-#[instrument]
 pub async fn relay_kcp(mut tcp: TcpStream, session: Session) -> Result<()> {
     let (read, write) = tcp.split();
     let res = select! {

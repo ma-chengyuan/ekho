@@ -17,13 +17,15 @@ OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+#![allow(dead_code)]
+
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
 use thiserror::Error;
-use tokio::net::{TcpStream};
+use tokio::net::TcpStream;
 
 pub const SOCKS5_VERSION: u8 = 0x05;
 const ATYP_IPV4: u8 = 0x01;

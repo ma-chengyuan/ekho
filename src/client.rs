@@ -27,16 +27,15 @@ use anyhow::{bail, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task;
-use tracing::error;
-use tracing::instrument;
+use tracing::{debug, error, instrument};
 
-#[instrument]
+#[instrument(skip(local), fields(local = "local.peer_addr().unwrap()"))]
 async fn handle_socks(mut local: TcpStream) -> Result<()> {
     let mut buf = [0; 1024];
     let len = local
         .read(&mut buf)
         .await
-        .context("reading SOCKS5 handshake")?;
+        .context("failed to read SOCKS5 handshake")?;
     if len < 2 || len != buf[1] as usize + 2 || buf[0] != SOCKS5_VERSION {
         bail!("invalid SOCKS5 greeting message from {:?}", local);
     }
@@ -55,6 +54,7 @@ async fn handle_socks(mut local: TcpStream) -> Result<()> {
         .await
         .context("reading SOCKS5 request")?;
     let request = Socks5Request::parse(&buf[..len])?;
+    debug!("{:?}", request);
     match request.cmd {
         Socks5Command::Connect => {
             if connect_directly(&request.dst) {
@@ -85,15 +85,17 @@ async fn handle_socks(mut local: TcpStream) -> Result<()> {
                     }
                 }
             } else {
-                let kcp = Session::connect(config().remote.unwrap());
-                kcp.send(&request.marshal()).await;
-                let reply = Socks5Reply::parse(&kcp.recv().await)?;
+                let session = Session::connect(config().remote.unwrap());
+                session.send(&request.marshal()).await;
+                let reply = Socks5Reply::parse(&session.recv().await)?;
                 local
                     .write_all(&reply.marshal())
                     .await
                     .context("forwarding reply from server")?;
                 if let Socks5Reply::Success { .. } = reply {
-                    relay_kcp(local, kcp).await?;
+                    relay_kcp(local, session).await?;
+                } else {
+                    session.close().await;
                 }
             }
         }
@@ -108,7 +110,7 @@ async fn handle_socks(mut local: TcpStream) -> Result<()> {
 }
 
 pub fn connect_directly(_addr: &Socks5SocketAddr) -> bool {
-    false
+    true
 }
 
 #[instrument]

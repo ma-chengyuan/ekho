@@ -106,7 +106,7 @@ fn recv_loop(mut rx: TransportReceiver) {
     let sender = RX_CHANNEL.0.lock();
     loop {
         let (packet, addr) = {
-            let span = debug_span!("icmp_recv");
+            let span = debug_span!("recv_icmp_packet");
             let _enter = span.enter();
             iter.next().expect("error receiving ICMP packet")
         };
@@ -145,7 +145,7 @@ fn send_loop(mut tx: TransportSender) {
     let mut receiver = TX_CHANNEL.1.lock();
     loop {
         let result = if resend {
-            let span = debug_span!("icmp_resend");
+            let span = debug_span!("resend_icmp");
             let _enter = span.enter();
             tx.send_to(
                 IcmpPacket::new(&buf[..len]).unwrap(),
@@ -153,11 +153,11 @@ fn send_loop(mut tx: TransportSender) {
             )
         } else {
             let (dst, data) = {
-                let span = debug_span!("icmp_blocking_recv");
+                let span = debug_span!("recv_payload");
                 let _enter = span.enter();
                 receiver.blocking_recv().unwrap()
             };
-            let span = debug_span!("icmp_send");
+            let span = debug_span!("send_icmp");
             let _enter = span.enter();
             len = IcmpPacket::minimum_packet_size() + 4 + data.len();
             let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
@@ -327,7 +327,7 @@ mod platform_impl {
                 // raw socket Windows actually binds that socket to the network adapter. As long as
                 // the network adapter does not change the change of local IP does not invalidate
                 // the socket.
-                debug!("Local IP changed to {:?}", LOCAL_IP.read());
+                debug!("local IP changed to {:?}", LOCAL_IP.read());
             });
             Ok(())
         }
