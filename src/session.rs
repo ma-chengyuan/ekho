@@ -42,7 +42,7 @@ use tokio::sync::Notify;
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, Duration};
-use tracing::{debug, debug_span, error, instrument};
+use tracing::{debug, debug_span, error, instrument, warn};
 use tracing_futures::Instrument;
 
 type Control = (Mutex<ControlBlock>, Notify);
@@ -109,11 +109,14 @@ impl Session {
                     let peer_closing = peer_closing_cloned.load(Ordering::SeqCst);
                     let local_closing = local_closing_cloned.load(Ordering::SeqCst);
                     if kcp.dead_link() || peer_closing && local_closing && kcp.all_flushed() {
+                        if kcp.dead_link() {
+                            warn!("dead link");
+                        }
                         break;
                     }
                 }
             }
-        });
+        }.instrument(debug_span!("update loop", ?peer, conv)));
         Session {
             conv,
             peer,
@@ -137,7 +140,7 @@ impl Session {
         INCOMING.1.lock().await.recv().await.unwrap()
     }
 
-    #[instrument]
+    #[instrument(skip(buf))]
     pub async fn send(&self, buf: &[u8]) {
         loop {
             {

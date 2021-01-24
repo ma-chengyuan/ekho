@@ -128,6 +128,7 @@ fn recv_loop(mut rx: TransportReceiver) {
     }
 }
 
+/*
 #[instrument(skip(tx))]
 fn send_loop(mut tx: TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
@@ -182,6 +183,47 @@ fn send_loop(mut tx: TransportSender) {
                 // (perhaps a driver-dependent issue). In this case we shall just attempt to resend
                 // that packet.
                 Some(105 /* ENOBUFS */) if cfg!(unix) => true,
+                _ => panic!("error sending ICMP packets: {}", e),
+            },
+        }
+    }
+}
+ */
+
+#[instrument(skip(tx))]
+fn send_loop(mut tx: TransportSender) {
+    let mut buf = vec![0u8; IcmpPacket::minimum_packet_size() + 4 + config().kcp.mtu as usize];
+    let mut seq: FxHashMap<IcmpEndpoint, u16> = FxHashMap::default();
+    let code = match config().remote {
+        Some(_) => IcmpTypes::EchoRequest,
+        None => IcmpTypes::EchoReply,
+    };
+    let mut receiver = TX_CHANNEL.1.lock();
+    loop {
+        let (dst, data) = {
+            let span = debug_span!("recv_payload");
+            let _enter = span.enter();
+            receiver.blocking_recv().unwrap()
+        };
+        let span = debug_span!("send_icmp", ?dst);
+        let _enter = span.enter();
+        let len = IcmpPacket::minimum_packet_size() + 4 + data.len();
+        let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
+        packet.set_icmp_type(code);
+        let payload = packet.payload_mut();
+        payload[..2].copy_from_slice(&dst.id.to_be_bytes());
+        payload[2..4].copy_from_slice(&seq.entry(dst).or_insert(0).to_be_bytes());
+        payload[4..].copy_from_slice(&data);
+        packet.set_checksum(pnet_packet::icmp::checksum(&packet.to_immutable()));
+        match tx.send_to(packet.consume_to_immutable(), IpAddr::from(dst.ip)) {
+            Ok(_) => {
+                // Increment the seq. number
+                seq.entry(dst)
+                    .and_modify(|s| *s = (Wrapping(*s) + Wrapping(1)).0);
+            }
+            Err(e) => match e.raw_os_error() {
+                // Silently drop the packet if we are sending too fast
+                Some(105 /* ENOBUFS */) if cfg!(unix) => continue,
                 _ => panic!("error sending ICMP packets: {}", e),
             },
         }
