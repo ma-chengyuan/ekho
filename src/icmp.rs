@@ -192,7 +192,8 @@ fn send_loop(mut tx: TransportSender) {
 
 #[instrument(skip(tx))]
 fn send_loop(mut tx: TransportSender) {
-    let mut buf = vec![0u8; IcmpPacket::minimum_packet_size() + 4 + config().kcp.mtu as usize];
+    let overhead = IcmpPacket::minimum_packet_size() + 4 /* id & seq */;
+    let mut buf = vec![0u8; overhead + 16 /* Chacha20-Poly1305 */ + config().kcp.mtu as usize];
     let mut seq: FxHashMap<IcmpEndpoint, u16> = FxHashMap::default();
     let code = match config().remote {
         Some(_) => IcmpTypes::EchoRequest,
@@ -207,7 +208,7 @@ fn send_loop(mut tx: TransportSender) {
         };
         let span = debug_span!("send_icmp", ?dst);
         let _enter = span.enter();
-        let len = IcmpPacket::minimum_packet_size() + 4 + data.len();
+        let len = overhead + data.len();
         let mut packet = MutableIcmpPacket::new(&mut buf[0..len]).unwrap();
         packet.set_icmp_type(code);
         let payload = packet.payload_mut();

@@ -88,35 +88,38 @@ impl Session {
         let local_closing = Arc::new(AtomicBool::new(false));
         let peer_closing_cloned = peer_closing.clone();
         let local_closing_cloned = local_closing.clone();
-        let updater = task::spawn(async move {
-            let icmp_tx = crate::icmp::clone_sender().await;
-            let mut interval = interval(Duration::from_millis(config().kcp.interval as u64));
-            'update_loop: loop {
-                {
-                    interval.tick().await;
-                    let mut kcp = control_cloned.0.lock();
-                    kcp.flush();
-                    control_cloned.1.notify_waiters();
-                    while let Some(mut raw) = kcp.output() {
-                        // dissect_headers_from_raw(&raw, "send");
-                        if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
-                            icmp_tx.send((peer, raw)).unwrap();
-                        } else {
-                            error!("error encrypting block");
-                            break 'update_loop;
+        let updater = task::spawn(
+            async move {
+                let icmp_tx = crate::icmp::clone_sender().await;
+                let mut interval = interval(Duration::from_millis(config().kcp.interval as u64));
+                'update_loop: loop {
+                    {
+                        interval.tick().await;
+                        let mut kcp = control_cloned.0.lock();
+                        kcp.flush();
+                        control_cloned.1.notify_waiters();
+                        while let Some(mut raw) = kcp.output() {
+                            // dissect_headers_from_raw(&raw, "send");
+                            if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
+                                icmp_tx.send((peer, raw)).unwrap();
+                            } else {
+                                error!("error encrypting block");
+                                break 'update_loop;
+                            }
                         }
-                    }
-                    let peer_closing = peer_closing_cloned.load(Ordering::SeqCst);
-                    let local_closing = local_closing_cloned.load(Ordering::SeqCst);
-                    if kcp.dead_link() || peer_closing && local_closing && kcp.all_flushed() {
-                        if kcp.dead_link() {
-                            warn!("dead link");
+                        let peer_closing = peer_closing_cloned.load(Ordering::SeqCst);
+                        let local_closing = local_closing_cloned.load(Ordering::SeqCst);
+                        if kcp.dead_link() || peer_closing && local_closing && kcp.all_flushed() {
+                            if kcp.dead_link() {
+                                warn!("dead link");
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
-        }.instrument(debug_span!("update loop", ?peer, conv)));
+            .instrument(debug_span!("update loop", ?peer, conv)),
+        );
         Session {
             conv,
             peer,
