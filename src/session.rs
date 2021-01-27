@@ -180,6 +180,7 @@ impl Session {
         }
     }
 
+    #[instrument]
     pub async fn close(self) {
         select! {
             _ = sleep(CLOSE_TIMEOUT) => {}

@@ -334,7 +334,7 @@ impl ControlBlock {
     /// **Note**: if [stream mode](#structfield.stream) is off (by default), then one receive
     /// corresponds to one [send](#method.send) on the other side. Otherwise, this correlation
     /// may not hold as in stream mode KCP will try to merge payloads to reduce overheads.
-    #[instrument(level = "trace", skip(self))]
+    #[instrument(skip(self))]
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         let size = self.peek_size()?;
         let mut ret = Vec::with_capacity(size);
@@ -357,7 +357,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
-    #[instrument(level = "trace", name = "kcp send", skip(self, buf), fields(len = buf.len()))]
+    #[instrument( name = "kcp send",skip(self, buf), fields(len = buf.len()))]
     pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
         let mss = self.config.mss();
         if self.config.stream {
@@ -595,7 +595,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
-    #[instrument(level = "trace", skip(self, data), fields(len = data.len()))]
+    #[instrument(skip(self, data), fields(len = data.len()))]
     pub fn input(&mut self, mut data: &[u8]) -> Result<usize> {
         self.sync_now();
         let prev_len = data.len();
@@ -783,7 +783,6 @@ impl ControlBlock {
 
     /// Attempts to pull enqueued send segments into the send buffer, and to (re)transmit them if ne
     /// cessary
-    #[instrument(level = "trace", skip(self))]
     fn flush_push(&mut self) {
         let limit = self.calc_bbr_limit();
         // debug!(conv = self.conv, limit = limit);
@@ -831,7 +830,7 @@ impl ControlBlock {
     /// Flushes packets from the [send queue](#structfield.send_queue) to the
     /// [send buffer](#structfield.send_buf), and (re)transmits the packets in the send buffer
     /// if necessary.
-    #[instrument(level = "trace", skip(self))]
+    #[instrument(skip(self))]
     pub fn flush(&mut self) {
         self.sync_now();
         self.flush_probe();
