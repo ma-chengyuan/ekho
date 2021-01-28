@@ -42,44 +42,57 @@ use std::thread;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tracing::{debug_span, instrument};
+use derivative::Derivative;
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
-pub struct IcmpEndpoint {
+pub struct Endpoint {
     pub ip: Ipv4Addr,
     pub id: u16,
 }
 
-impl fmt::Display for IcmpEndpoint {
+#[derive(Clone, Debug, Deserialize, Derivative)]
+#[derivative(Default)]
+#[serde(default)]
+pub struct Config {
+    #[derivative(Default(value = "1024"))]
+    pub send_buffer: usize,
+    #[derivative(Default(value = "1024"))]
+    pub recv_buffer: usize,
+    #[derivative(Default(value = "8192"))]
+    pub raw_buffer: usize,
+}
+
+impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.ip, self.id)
     }
 }
 
-type IcmpSender = Sender<(IcmpEndpoint, Vec<u8>)>;
-type IcmpReceiver = Receiver<(IcmpEndpoint, Vec<u8>)>;
+type PacketSender = Sender<(Endpoint, Vec<u8>)>;
+type PacketReceiver = Receiver<(Endpoint, Vec<u8>)>;
 
 lazy_static! {
-    static ref TX_CHANNEL: (Mutex<IcmpSender>, SyncMutex<IcmpReceiver>) = {
-        let (tx, rx) = channel(1024);
+    static ref TX_CHANNEL: (Mutex<PacketSender>, SyncMutex<PacketReceiver>) = {
+        let (tx, rx) = channel(config().icmp.send_buffer);
         (Mutex::new(tx), SyncMutex::new(rx))
     };
-    static ref RX_CHANNEL: (SyncMutex<IcmpSender>, Mutex<IcmpReceiver>) = {
-        let (tx, rx) = channel(1024);
+    static ref RX_CHANNEL: (SyncMutex<PacketSender>, Mutex<PacketReceiver>) = {
+        let (tx, rx) = channel(config().icmp.recv_buffer);
         (SyncMutex::new(tx), Mutex::new(rx))
     };
 }
 
-pub async fn clone_sender() -> IcmpSender {
+pub async fn clone_sender() -> PacketSender {
     TX_CHANNEL.0.lock().await.clone()
 }
 
-pub async fn receive_packet() -> (IcmpEndpoint, Vec<u8>) {
+pub async fn receive_packet() -> (Endpoint, Vec<u8>) {
     RX_CHANNEL.1.lock().await.recv().await.unwrap()
 }
 
 pub async fn init_send_recv_loop() -> Result<()> {
     let (tx, rx) = transport_channel(
-        8192,
+        config().icmp.raw_buffer,
         TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
     )
     .with_context(|| {
@@ -117,7 +130,7 @@ fn recv_loop(mut rx: TransportReceiver) {
                     || packet.get_icmp_type() == IcmpTypes::EchoReply)
                     && payload.len() >= 4
                 {
-                    let endpoint = IcmpEndpoint {
+                    let endpoint = Endpoint {
                         ip: ipv4,
                         id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
                     };
@@ -135,12 +148,12 @@ fn send_loop(mut tx: TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
     let mut resend = false;
     let mut len = 0usize;
-    let mut seq: FxHashMap<IcmpEndpoint, u16> = FxHashMap::default();
+    let mut seq: FxHashMap<Endpoint, u16> = FxHashMap::default();
     let code = match config().remote {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
     };
-    let mut last_dst = IcmpEndpoint {
+    let mut last_dst = Endpoint {
         ip: Ipv4Addr::UNSPECIFIED,
         id: 0,
     };

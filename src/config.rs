@@ -17,7 +17,7 @@ OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-use crate::icmp::IcmpEndpoint;
+use crate::icmp::Endpoint;
 use anyhow::{Context, Result};
 use chacha20poly1305::Key;
 use once_cell::sync::OnceCell;
@@ -29,8 +29,9 @@ use std::path::Path;
 #[derive(Deserialize, Debug)]
 pub struct Config {
     #[serde(default)]
-    pub remote: Option<IcmpEndpoint>,
+    pub remote: Option<Endpoint>,
     pub kcp: crate::kcp::Config,
+    pub icmp: crate::icmp::Config,
     #[serde(deserialize_with = "deserialize_key")]
     pub key: Key,
 }

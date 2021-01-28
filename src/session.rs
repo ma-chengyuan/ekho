@@ -21,7 +21,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #![allow(dead_code)]
 use crate::config::config;
-use crate::icmp::IcmpEndpoint;
+use crate::icmp::Endpoint;
 
 use crate::kcp::{ControlBlock, Error};
 use chacha20poly1305::aead::{AeadInPlace, NewAead};
@@ -46,7 +46,7 @@ use tracing_futures::Instrument;
 type Control = (Mutex<ControlBlock>, Notify);
 
 lazy_static! {
-    static ref CONTROLS: DashMap<(IcmpEndpoint, u32), Weak<Control>, BuildHasherDefault<FxHasher>> =
+    static ref CONTROLS: DashMap<(Endpoint, u32), Weak<Control>, BuildHasherDefault<FxHasher>> =
         Default::default();
     static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&config().key);
     static ref NONCE: Nonce = Nonce::default();
@@ -61,7 +61,7 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(60);
 /// A session, built on top of KCP
 pub struct Session {
     conv: u32,
-    peer: IcmpEndpoint,
+    peer: Endpoint,
     updater: JoinHandle<()>,
     control: Arc<Control>,
     peer_closing: Arc<AtomicBool>,
@@ -70,7 +70,7 @@ pub struct Session {
 
 impl Session {
     /// Creates a new session given a peer endpoint and a conv.
-    pub fn new(peer: IcmpEndpoint, conv: u32) -> Self {
+    pub fn new(peer: Endpoint, conv: u32) -> Self {
         assert!(!CONTROLS.contains_key(&(peer, conv)));
         // The naming here is very nasty!
         let control = Arc::new((
@@ -124,7 +124,7 @@ impl Session {
         }
     }
 
-    pub fn connect(peer: IcmpEndpoint) -> Self {
+    pub fn connect(peer: Endpoint) -> Self {
         loop {
             let conv = thread_rng().gen();
             if !CONTROLS.contains_key(&(peer, conv)) {
