@@ -159,8 +159,11 @@ struct Segment {
     sends: u32,
     #[derivative(Debug = "ignore")]
     payload: Vec<u8>,
-    #[derivative(Debug = "ignore")]
-    bbr: Vec<(u32, usize, u32, bool)>,
+
+    ts_last_send: u32,
+    delivered: usize,
+    ts_last_ack: u32,
+    app_limited: bool,
 }
 
 /// KCP control block with BBR congestion control.
@@ -357,7 +360,7 @@ impl ControlBlock {
     ///
     /// **Note**: After calling this do remember to call [check](#method.check), as
     /// an input packet may invalidate previous time estimations of the next update.
-    #[instrument( name = "kcp send",skip(self, buf), fields(len = buf.len()))]
+    #[instrument(skip(self, buf), fields(len = buf.len()))]
     pub fn send(&mut self, mut buf: &[u8]) -> Result<()> {
         let mss = self.config.mss();
         if self.config.stream {
@@ -424,11 +427,7 @@ impl ControlBlock {
 
     /// Updates BBR filters and relevant fields when a packet is acknowledged, roughly equivalent to
     /// the `onAck` function in the BBR paper.
-    fn update_bbr_on_ack(
-        &mut self,
-        seg: &Segment,
-        (ts, delivered, ts_last_ack, app_limited): (u32, usize, u32, bool),
-    ) {
+    fn update_bbr_on_ack(&mut self, seg: &Segment) {
         self.delivered += seg.payload.len() + OVERHEAD as usize;
         self.ts_last_ack = self.now;
         self.inflight = self
@@ -437,8 +436,8 @@ impl ControlBlock {
         self.app_limited_until = self
             .app_limited_until
             .saturating_sub(seg.payload.len() + OVERHEAD as usize);
-        if self.now >= ts {
-            let rtt = max(self.now - ts, 1);
+        if seg.sends == 1 {
+            let rtt = max(self.now - seg.ts_last_send, 1);
             self.update_rtt_filters(rtt);
             while self.rt_prop_queue.back().map_or(false, |p| p.1 >= rtt) {
                 self.rt_prop_queue.pop_back().unwrap();
@@ -455,9 +454,10 @@ impl ControlBlock {
                 self.rt_prop_expired = false;
             }
 
-            let btl_bw =
-                (self.delivered - delivered) / max(self.ts_last_ack - ts_last_ack, 1) as usize;
-            if !app_limited || btl_bw > self.btl_bw_queue.front().map_or(0, |p| p.1) {
+            let btl_bw = (self.delivered - seg.delivered)
+                / max(self.ts_last_ack - seg.ts_last_ack, 1) as usize;
+            if !seg.app_limited || btl_bw > self.btl_bw_queue.front().map_or(0, |p| p.1) {
+                // {
                 while self.btl_bw_queue.front().map_or(false, |p| {
                     p.0 + self.config.btl_bw_wnd * self.srtt <= self.now
                 }) {
@@ -491,7 +491,7 @@ impl ControlBlock {
             }
             BBRState::Drain => {
                 if self.inflight <= self.bdp() {
-                    let phase: usize = thread_rng().gen_range(0, BBR_GAIN_CYCLE.len() - 1);
+                    let phase: usize = thread_rng().gen_range(0..BBR_GAIN_CYCLE.len() - 1);
                     self.bbr_state =
                         BBRState::ProbeBW(self.now, if phase >= 1 { phase + 1 } else { phase });
                 }
@@ -519,15 +519,11 @@ impl ControlBlock {
 
     /// Removes the packet from the [send buffer](#structfield.send_buf) whose sequence number is `sn`
     /// marks it as acknowledged.
-    fn ack_packet_with_sn(&mut self, sn: u32, ts: u32) {
+    fn ack_packet_with_sn(&mut self, sn: u32, _ts: u32) {
         // tracing::debug!("ack sn {} {} {}", sn, self.send_una, self.send_nxt);
         if self.send_una <= sn && sn < self.send_nxt {
             if let Some(seg) = self.send_buf.remove(sn as usize) {
-                for send in seg.bbr.iter().rev() {
-                    if send.0 == ts {
-                        self.update_bbr_on_ack(&seg, *send);
-                    }
-                }
+                self.update_bbr_on_ack(&seg);
             }
         }
     }
@@ -537,18 +533,7 @@ impl ControlBlock {
     fn ack_packets_before_una(&mut self, una: u32) {
         while matches!(self.send_buf.front(), Some(seg) if seg.sn < una) {
             let seg = self.send_buf.pop_unchecked();
-            let ts = self.now - self.srtt;
-            let mut opt: Option<(u32, usize, u32, bool)> = None;
-            for send in seg.bbr.iter().rev() {
-                if opt.map_or(true, |opt| diff(ts, send.0) >= diff(ts, opt.0)) {
-                    opt = Some(*send);
-                } else {
-                    break;
-                }
-            }
-            if let Some(opt) = opt {
-                self.update_bbr_on_ack(&seg, opt)
-            }
+            self.update_bbr_on_ack(&seg);
         }
     }
 
@@ -751,7 +736,9 @@ impl ControlBlock {
     fn prepare_send(&self, seg: &mut Segment) -> u32 {
         seg.sends += 1;
         seg.ts = self.now;
-        seg.bbr.push((seg.ts, self.delivered, self.ts_last_ack, self.app_limited_until > 0));
+        seg.delivered = self.delivered;
+        seg.ts_last_ack = self.ts_last_ack;
+        seg.app_limited = self.app_limited_until > 0;
         // First retransmission
         if seg.sends == 1 {
             seg.rto = self.rto;
@@ -811,6 +798,7 @@ impl ControlBlock {
             if let Some(seg) = send_buf.get_mut(sn as usize) {
                 if ts == seg.ts {
                     seg.ts = self.prepare_send(seg);
+                    seg.ts_last_send = ts;
                     self.dead_link |= seg.sends >= self.config.dead_link_thres;
                     self.flush_segment(Command::Push, seg.frg, seg.sn, ts, seg.payload.len());
                     self.buffer.extend_from_slice(&seg.payload);
@@ -882,6 +870,16 @@ impl ControlBlock {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn debug(&self) {
+        tracing::info!(
+            "rtprop {:4} btlbw {:8} appl {} dlvred {}",
+            self.rt_prop_queue.front().map_or(0, |p| p.1),
+            self.btl_bw_queue.front().map_or(0, |p| p.1),
+            self.app_limited_until,
+            self.delivered
+        )
     }
 }
 
