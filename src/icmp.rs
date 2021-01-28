@@ -143,6 +143,7 @@ fn recv_loop(mut rx: TransportReceiver) {
     }
 }
 
+/*
 #[instrument(skip(tx))]
 fn send_loop(mut tx: TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
@@ -203,12 +204,13 @@ fn send_loop(mut tx: TransportSender) {
     }
 }
 
-/*
+ */
+
 #[instrument(skip(tx))]
 fn send_loop(mut tx: TransportSender) {
     let overhead = IcmpPacket::minimum_packet_size() + 4 /* id & seq */;
     let mut buf = vec![0u8; overhead + 16 /* Chacha20-Poly1305 */ + config().kcp.mtu as usize];
-    let mut seq: FxHashMap<IcmpEndpoint, u16> = FxHashMap::default();
+    let mut seq: FxHashMap<Endpoint, u16> = FxHashMap::default();
     let code = match config().remote {
         Some(_) => IcmpTypes::EchoRequest,
         None => IcmpTypes::EchoReply,
@@ -244,8 +246,6 @@ fn send_loop(mut tx: TransportSender) {
         }
     }
 }
-
- */
 
 /// On windows, ICMP raw sockets will not work if bound to 0.0.0.0 instead of a specific IP, as is
 /// the default behavior of libpnet.
