@@ -39,7 +39,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::Wrapping;
 use std::thread;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tracing::{debug_span, instrument};
 
@@ -55,21 +55,21 @@ impl fmt::Display for IcmpEndpoint {
     }
 }
 
-type Sender = UnboundedSender<(IcmpEndpoint, Vec<u8>)>;
-type Receiver = UnboundedReceiver<(IcmpEndpoint, Vec<u8>)>;
+type IcmpSender = Sender<(IcmpEndpoint, Vec<u8>)>;
+type IcmpReceiver = Receiver<(IcmpEndpoint, Vec<u8>)>;
 
 lazy_static! {
-    static ref TX_CHANNEL: (Mutex<Sender>, SyncMutex<Receiver>) = {
-        let (tx, rx) = unbounded_channel();
+    static ref TX_CHANNEL: (Mutex<IcmpSender>, SyncMutex<IcmpReceiver>) = {
+        let (tx, rx) = channel(1024);
         (Mutex::new(tx), SyncMutex::new(rx))
     };
-    static ref RX_CHANNEL: (SyncMutex<Sender>, Mutex<Receiver>) = {
-        let (tx, rx) = unbounded_channel();
+    static ref RX_CHANNEL: (SyncMutex<IcmpSender>, Mutex<IcmpReceiver>) = {
+        let (tx, rx) = channel(1024);
         (SyncMutex::new(tx), Mutex::new(rx))
     };
 }
 
-pub async fn clone_sender() -> Sender {
+pub async fn clone_sender() -> IcmpSender {
     TX_CHANNEL.0.lock().await.clone()
 }
 
@@ -121,14 +121,15 @@ fn recv_loop(mut rx: TransportReceiver) {
                         ip: ipv4,
                         id: u16::from_be_bytes(payload[..2].try_into().unwrap()),
                     };
-                    sender.send((endpoint, Vec::from(&payload[4..]))).unwrap();
+                    sender
+                        .blocking_send((endpoint, Vec::from(&payload[4..])))
+                        .unwrap();
                 }
             }
         }
     }
 }
 
-/*
 #[instrument(skip(tx))]
 fn send_loop(mut tx: TransportSender) {
     let mut buf = [0u8; 1500 /* typical Ethernet MTU */];
@@ -188,8 +189,8 @@ fn send_loop(mut tx: TransportSender) {
         }
     }
 }
- */
 
+/*
 #[instrument(skip(tx))]
 fn send_loop(mut tx: TransportSender) {
     let overhead = IcmpPacket::minimum_packet_size() + 4 /* id & seq */;
@@ -230,6 +231,8 @@ fn send_loop(mut tx: TransportSender) {
         }
     }
 }
+
+ */
 
 /// On windows, ICMP raw sockets will not work if bound to 0.0.0.0 instead of a specific IP, as is
 /// the default behavior of libpnet.

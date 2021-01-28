@@ -173,8 +173,8 @@ mod kcp_test {
     }
 
     lazy_static! {
-        static ref A_B: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.01));
-        static ref B_A: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.01));
+        static ref A_B: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.05));
+        static ref B_A: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.05));
         static ref A: Mutex<ControlBlock> =
             Mutex::new(ControlBlock::new(12345, config().kcp.clone()));
         static ref B: Mutex<ControlBlock> =
@@ -183,7 +183,11 @@ mod kcp_test {
     }
 
     pub async fn test() {
-        let _ = task::spawn(async {
+        let size = Arc::new(Mutex::new(0));
+        let size_cloned = size.clone();
+        let sent = Arc::new(Mutex::new(0));
+        let sent_cloned = sent.clone();
+        let _ = task::spawn(async move {
             let mut interval = interval(Duration::from_millis(config().kcp.interval as u64));
             loop {
                 interval.tick().await;
@@ -191,6 +195,7 @@ mod kcp_test {
                     let mut kcp = A.lock();
                     kcp.flush();
                     while let Some(packet) = kcp.output() {
+                        *size_cloned.lock() += packet.len();
                         A_B.lock().send(packet)
                     }
                     A_N.notify_waiters();
@@ -204,7 +209,7 @@ mod kcp_test {
                 }
             }
         });
-        let _ = task::spawn(async {
+        let _ = task::spawn(async move {
             let mut interval = interval(Duration::from_millis(10));
             let mut first = true;
             loop {
@@ -217,11 +222,12 @@ mod kcp_test {
                     loop {
                         match kcp.recv() {
                             Err(Error::NotAvailable) => break,
-                            Ok(_) => {
+                            Ok(packet) => {
                                 if first {
                                     first = false;
                                     info!("received!");
                                 }
+                                *sent_cloned.lock() += packet.len();
                             }
                             Err(err) => panic!("{:?}", err),
                         }
@@ -246,17 +252,16 @@ mod kcp_test {
         let mut buf = vec![0u8; config().kcp.mss()];
         info!("Read file!");
         let total = file.metadata().await.unwrap().len();
-        let sent = Arc::new(Mutex::new(0usize));
-        let sent_cloned = sent.clone();
         let _ = task::spawn(async move {
             let mut interval = interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 let sent = sent.lock();
                 info!(
-                    "sent {:.2}MB ({:2}%)",
+                    "sent {:.2}MB ({:2}%) ({:.2}MB)",
                     *sent as f64 / 1048576.0,
-                    *sent as f64 / total as f64 * 100.0
+                    *sent as f64 / total as f64 * 100.0,
+                    *size.lock() as f64 / 1048576.0
                 );
                 A.lock().debug();
             }
@@ -267,7 +272,6 @@ mod kcp_test {
                 info!("done!");
                 break;
             }
-            *sent_cloned.lock() += len;
             while A.lock().wait_send() >= config().kcp.send_wnd as usize {
                 A_N.notified().await;
             }

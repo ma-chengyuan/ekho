@@ -28,7 +28,6 @@ use chacha20poly1305::aead::{AeadInPlace, NewAead};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use parking_lot::Mutex;
 use rand::{thread_rng, Rng};
 use rustc_hash::FxHasher;
 use std::fmt;
@@ -37,8 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use tokio::select;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, Duration};
@@ -52,12 +50,9 @@ lazy_static! {
         Default::default();
     static ref CIPHER: ChaCha20Poly1305 = ChaCha20Poly1305::new(&config().key);
     static ref NONCE: Nonce = Nonce::default();
-    static ref INCOMING: (
-        UnboundedSender<Session>,
-        AsyncMutex<UnboundedReceiver<Session>>
-    ) = {
+    static ref INCOMING: (UnboundedSender<Session>, Mutex<UnboundedReceiver<Session>>) = {
         let (tx, rx) = unbounded_channel();
-        (tx, AsyncMutex::new(rx))
+        (tx, Mutex::new(rx))
     };
 }
 
@@ -95,13 +90,13 @@ impl Session {
                 'update_loop: loop {
                     {
                         interval.tick().await;
-                        let mut kcp = control_cloned.0.lock();
+                        let mut kcp = control_cloned.0.lock().await;
                         kcp.flush();
                         control_cloned.1.notify_waiters();
                         while let Some(mut raw) = kcp.output() {
                             // dissect_headers_from_raw(&raw, "send");
                             if CIPHER.encrypt_in_place(&NONCE, b"", &mut raw).is_ok() {
-                                icmp_tx.send((peer, raw)).unwrap();
+                                icmp_tx.send((peer, raw)).await.unwrap();
                             } else {
                                 error!("error encrypting block");
                                 break 'update_loop;
@@ -117,8 +112,7 @@ impl Session {
                         }
                     }
                 }
-            }
-            .instrument(debug_span!("update loop", ?peer, conv)),
+            }, // .instrument(debug_span!("update loop", ?peer, conv)),
         );
         Session {
             conv,
@@ -147,7 +141,7 @@ impl Session {
     pub async fn send(&self, buf: &[u8]) {
         loop {
             {
-                let mut kcp = self.control.0.lock();
+                let mut kcp = self.control.0.lock().await;
                 if kcp.wait_send() < kcp.config().send_wnd as usize {
                     if buf.is_empty() {
                         self.local_closing.store(true, Ordering::SeqCst);
@@ -164,7 +158,7 @@ impl Session {
     pub async fn recv(&self) -> Vec<u8> {
         loop {
             {
-                let mut kcp = self.control.0.lock();
+                let mut kcp = self.control.0.lock().await;
                 match kcp.recv() {
                     Ok(data) => {
                         if data.is_empty() {
@@ -212,7 +206,7 @@ async fn dispatch_loop() {
             .await;
         if CIPHER.decrypt_in_place(&NONCE, b"", &mut raw).is_err() {
             // Mimic real ping behavior
-            sender.send((from, raw)).unwrap();
+            sender.send((from, raw)).await.unwrap();
             continue;
         }
         let conv = crate::kcp::conv_from_raw(&raw);
@@ -225,7 +219,7 @@ async fn dispatch_loop() {
         }
         if let Some(control) = control {
             // dissect_headers_from_raw(&raw, "recv");
-            let mut kcp = control.0.lock();
+            let mut kcp = control.0.lock().await;
             kcp.input(&raw).unwrap();
             control.1.notify_waiters();
         }
