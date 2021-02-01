@@ -30,6 +30,7 @@ use crate::config::config;
 use anyhow::Result;
 use std::env;
 
+use crate::relay::relay_kcp;
 use tracing::info;
 use tracing::Level;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -56,6 +57,8 @@ async fn main() -> Result<()> {
     info!("Ekho (experimental asynchronous implementation) by Chengyuan Ma");
 
     config::load_config_from_file(config_path).await?;
+    kcp_test::test().await;
+    return Ok(());
     icmp::init_send_recv_loop().await?;
     session::init_dispatch_loop().await;
 
@@ -173,8 +176,8 @@ mod kcp_test {
     }
 
     lazy_static! {
-        static ref A_B: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.05));
-        static ref B_A: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.05));
+        static ref A_B: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.01));
+        static ref B_A: Mutex<Network> = Mutex::new(Network::new(100, 5.0, 0.01));
         static ref A: Mutex<ControlBlock> =
             Mutex::new(ControlBlock::new(12345, config().kcp.clone()));
         static ref B: Mutex<ControlBlock> =

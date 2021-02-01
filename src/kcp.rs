@@ -27,17 +27,21 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //!
 //! This is 100% compatible with other KCP implementations.
 
+mod pcc;
 mod timer;
 mod window;
 
+use crate::kcp::pcc::{MonitorInterval, PCC};
 use bytes::{Buf, BufMut};
 use derivative::Derivative;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use rand::{thread_rng, Rng};
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::convert::TryInto;
+use std::rc::Rc;
 use std::time::Instant;
 use thiserror::Error;
 use timer::Timer;
@@ -122,8 +126,6 @@ pub struct Config {
     /// Cap the maximum # of fast retransmission attempts.
     #[derivative(Default(value = "None"))]
     pub fast_resend_limit: Option<u32>,
-    #[derivative(Default(value = "false"))]
-    pub bbr: bool,
     /// Window length (unit: ms) for RTprop (Round-trip propagation time) filters in BBR.
     #[derivative(Default(value = "10000"))]
     pub rt_prop_wnd: u32,
@@ -137,6 +139,8 @@ pub struct Config {
     /// it is 1024-based e.g. set to 1024 for 1.0, 1536 for 1.5, and 2048 for 2.0 etc.
     #[derivative(Default(value = "1024"))]
     pub bdp_gain: usize,
+    #[derivative(Default(value = "None"))]
+    pub pcc: Option<pcc::Config>,
 }
 
 impl Config {
@@ -161,9 +165,7 @@ struct Segment {
     payload: Vec<u8>,
 
     ts_last_send: u32,
-    delivered: usize,
-    ts_last_ack: u32,
-    app_limited: bool,
+    mi: Option<Rc<RefCell<MonitorInterval>>>,
 }
 
 /// KCP control block with BBR congestion control.
@@ -233,25 +235,15 @@ pub struct ControlBlock {
     #[derivative(Debug = "ignore")]
     acks: VecDeque<(u32, u32)>,
 
-    /// Time of receiving the last ACK packet.
-    ts_last_ack: u32,
-    /// Bytes confirmed to have been delivered.
-    delivered: usize,
-    /// Bytes currently inflight.
     inflight: usize,
-    /// Monotonic queue for Round trip propagation time.
-    #[derivative(Debug = "ignore")]
-    rt_prop_queue: VecDeque<(u32, u32)>,
-    /// Monotonic queue for Bottleneck Bandwidth.
-    #[derivative(Debug = "ignore")]
-    btl_bw_queue: VecDeque<(u32, usize)>,
-    /// Whether the next BBR update should clear expired RTprop analysis.
-    rt_prop_expired: bool,
-    /// Current BBR state.
-    bbr_state: BBRState,
-    /// See the original BBR paper for more info.
-    app_limited_until: usize,
+    pcc: Option<PCC>,
 }
+
+/// Actually Segment will not be sent between threads
+unsafe impl Send for Segment {}
+
+/// Actually ControlBlock will not be sent between threads
+unsafe impl Send for ControlBlock {}
 
 /// States for the BBR congestion control algorithm.
 ///
@@ -280,7 +272,7 @@ impl ControlBlock {
             recv_nxt: 0,
             rto: config.rto_default,
             rtt_var: 0,
-            srtt: 0,
+            srtt: config.rto_default,
             rmt_wnd: config.recv_wnd,
             now: 0,
             ts_flush: config.interval,
@@ -297,15 +289,11 @@ impl ControlBlock {
             buffer: Vec::with_capacity(config.mtu as usize),
             epoch: Instant::now(),
             acks: Default::default(),
-
-            delivered: 0,
-            ts_last_ack: 0,
             inflight: 0,
-            rt_prop_queue: Default::default(),
-            btl_bw_queue: Default::default(),
-            rt_prop_expired: false,
-            bbr_state: BBRState::Startup,
-            app_limited_until: 0,
+            pcc: config
+                .pcc
+                .as_ref()
+                .map(|conf| PCC::new(conf.clone(), 0, config.rto_default)),
 
             config,
         }
@@ -427,94 +415,16 @@ impl ControlBlock {
 
     /// Updates BBR filters and relevant fields when a packet is acknowledged, roughly equivalent to
     /// the `onAck` function in the BBR paper.
-    fn update_bbr_on_ack(&mut self, seg: &Segment) {
-        self.delivered += seg.payload.len() + OVERHEAD as usize;
-        self.ts_last_ack = self.now;
+    fn on_ack(&mut self, seg: &Segment) {
         self.inflight = self
             .inflight
             .saturating_sub(seg.payload.len() + OVERHEAD as usize);
-        self.app_limited_until = self
-            .app_limited_until
-            .saturating_sub(seg.payload.len() + OVERHEAD as usize);
-        if seg.sends == 1 {
-            let rtt = max(self.now - seg.ts_last_send, 1);
-            self.update_rtt_filters(rtt);
-            while self.rt_prop_queue.back().map_or(false, |p| p.1 >= rtt) {
-                self.rt_prop_queue.pop_back().unwrap();
-            }
-            self.rt_prop_queue.push_back((self.now, rtt));
-            if self.rt_prop_expired {
-                while self
-                    .rt_prop_queue
-                    .front()
-                    .map_or(false, |p| p.0 + self.config.rt_prop_wnd <= self.now)
-                {
-                    self.rt_prop_queue.pop_front().unwrap();
-                }
-                self.rt_prop_expired = false;
-            }
-
-            let btl_bw = (self.delivered - seg.delivered)
-                / max(self.ts_last_ack - seg.ts_last_ack, 1) as usize;
-            if !seg.app_limited || btl_bw > self.btl_bw_queue.front().map_or(0, |p| p.1) {
-                // {
-                while self.btl_bw_queue.front().map_or(false, |p| {
-                    p.0 + self.config.btl_bw_wnd * self.srtt <= self.now
-                }) {
-                    self.btl_bw_queue.pop_front().unwrap();
-                }
-                while self.btl_bw_queue.back().map_or(false, |p| p.1 <= btl_bw) {
-                    self.btl_bw_queue.pop_back().unwrap();
-                }
-                self.btl_bw_queue.push_back((self.now, btl_bw));
-            }
+        let rtt = max(self.now - seg.ts_last_send, 1);
+        self.update_rtt_filters(rtt);
+        if let Some(pcc) = &mut self.pcc {
+            pcc.on_ack(&seg);
+            pcc.update(self.now, self.srtt);
         }
-    }
-
-    /// Updates the BBR state machine.
-    fn update_bbr_state(&mut self) {
-        if self.rt_prop_queue.is_empty() || self.srtt == 0 {
-            self.bbr_state = BBRState::Startup;
-            return;
-        }
-        match self.bbr_state {
-            BBRState::Startup => {
-                if self
-                    .btl_bw_queue
-                    .front()
-                    .map_or(false, |p| p.0 + 3 * self.srtt <= self.now)
-                {
-                    // Bottle neck bandwidth has not been updated in 3 RTTs, indicating that the pipe
-                    // is filled and we have probe the bandwidth, enter drain
-                    self.bbr_state = BBRState::Drain;
-                }
-            }
-            BBRState::Drain => {
-                if self.inflight <= self.bdp() {
-                    let phase: usize = thread_rng().gen_range(0..BBR_GAIN_CYCLE.len() - 1);
-                    self.bbr_state =
-                        BBRState::ProbeBW(self.now, if phase >= 1 { phase + 1 } else { phase });
-                }
-            }
-            BBRState::ProbeBW(since, phase) => {
-                let last_rt_prop_update = self.rt_prop_queue.front().unwrap().0;
-                if last_rt_prop_update + self.config.rt_prop_wnd <= self.now
-                    && !self.rt_prop_expired
-                {
-                    self.bbr_state = BBRState::ProbeRTT(self.now, phase);
-                    self.rt_prop_expired = true;
-                } else if since + self.srtt <= self.now {
-                    // Each gain cycle phase lasts for one RTT
-                    self.bbr_state =
-                        BBRState::ProbeBW(self.now, (phase + 1) % BBR_GAIN_CYCLE.len());
-                }
-            }
-            BBRState::ProbeRTT(since, phase) => {
-                if since + self.config.probe_rtt_time <= self.now {
-                    self.bbr_state = BBRState::ProbeBW(self.now, phase);
-                }
-            }
-        };
     }
 
     /// Removes the packet from the [send buffer](#structfield.send_buf) whose sequence number is `sn`
@@ -523,7 +433,7 @@ impl ControlBlock {
         // tracing::debug!("ack sn {} {} {}", sn, self.send_una, self.send_nxt);
         if self.send_una <= sn && sn < self.send_nxt {
             if let Some(seg) = self.send_buf.remove(sn as usize) {
-                self.update_bbr_on_ack(&seg);
+                self.on_ack(&seg);
             }
         }
     }
@@ -533,7 +443,7 @@ impl ControlBlock {
     fn ack_packets_before_una(&mut self, una: u32) {
         while matches!(self.send_buf.front(), Some(seg) if seg.sn < una) {
             let seg = self.send_buf.pop_unchecked();
-            self.update_bbr_on_ack(&seg);
+            self.on_ack(&seg);
         }
     }
 
@@ -640,7 +550,6 @@ impl ControlBlock {
         if let Some(sn) = self.config.fast_resend_thres.and(sn_max_ack) {
             self.increase_skip_acks(sn)
         }
-        self.update_bbr_state();
         self.flush_push();
         Ok(prev_len - data.len())
     }
@@ -708,24 +617,14 @@ impl ControlBlock {
     }
 
     /// Calculate the congestion limit based on BBR.
-    fn calc_bbr_limit(&mut self) -> usize {
+    fn calc_inflight_limit(&mut self) -> usize {
         // Because we are not really pacing the packets, the sending logic is different from what
         // is stated in the original BBR paper. The original BBR uses two parameters: cwnd_gain
         // and pacing_gain. However, the effects of the two parameters are hard to distinguish when
         // packets are flushed. Thus, it may be better to merge the two parameters into one here.
-        if self.config.bbr {
-            self.update_bbr_state();
-            let limit = match self.bbr_state {
-                BBRState::Startup => self.bdp() * 2955 / 1024, /* 2 / ln2 */
-                // ln2 / 2 is the value of pacing_gain. Given the current state machine logic in
-                // update_bbr_state, this value stops KCP from sending anything.
-                BBRState::Drain => self.bdp() * 355 / 1024, /* ln2 / 2 */
-                BBRState::ProbeBW(_, phase) => self.bdp() * BBR_GAIN_CYCLE[phase] / 4,
-                BBRState::ProbeRTT(_, _) => self.bdp() / 2,
-            };
-            // Empirical tests have found the current limit to be a bit conservative. One solution
-            // might be to multiply the current limit with a small, configurable gain.
-            limit * self.config.bdp_gain / BDP_GAIN_DEN
+        if let Some(pcc) = &mut self.pcc {
+            pcc.update(self.now, self.srtt);
+            (pcc.rate() * self.srtt as f64).round() as usize
         } else {
             usize::max_value()
         }
@@ -736,9 +635,6 @@ impl ControlBlock {
     fn prepare_send(&self, seg: &mut Segment) -> u32 {
         seg.sends += 1;
         seg.ts = self.now;
-        seg.delivered = self.delivered;
-        seg.ts_last_ack = self.ts_last_ack;
-        seg.app_limited = self.app_limited_until > 0;
         // First retransmission
         if seg.sends == 1 {
             seg.rto = self.rto;
@@ -771,7 +667,7 @@ impl ControlBlock {
     /// Attempts to pull enqueued send segments into the send buffer, and to (re)transmit them if ne
     /// cessary
     fn flush_push(&mut self) {
-        let limit = self.calc_bbr_limit();
+        let limit = self.calc_inflight_limit();
         // debug!(conv = self.conv, limit = limit);
         let cwnd = min(self.config.send_wnd, self.rmt_wnd);
         while self.send_nxt < self.send_una + cwnd as u32
@@ -785,9 +681,6 @@ impl ControlBlock {
             seg.ts = self.now;
             self.timer.schedule(self.now, seg.sn);
             self.send_buf.push(seg.sn as usize, seg);
-            if self.inflight <= limit && self.send_queue.is_empty() {
-                self.app_limited_until = self.inflight;
-            }
         }
 
         let mut send_buf = std::mem::take(&mut self.send_buf);
@@ -797,6 +690,13 @@ impl ControlBlock {
             }
             if let Some(seg) = send_buf.get_mut(sn as usize) {
                 if ts == seg.ts {
+                    if let Some(pcc) = &mut self.pcc {
+                        if seg.sends >= 1 {
+                            pcc.on_loss(seg);
+                            pcc.update(self.now, self.srtt);
+                        }
+                        pcc.prepare_send(seg);
+                    }
                     seg.ts = self.prepare_send(seg);
                     seg.ts_last_send = ts;
                     self.dead_link |= seg.sends >= self.config.dead_link_thres;
@@ -849,17 +749,6 @@ impl ControlBlock {
         self.send_buf.is_empty() && self.send_queue.is_empty() && self.buffer.is_empty()
     }
 
-    /// Returns the Bandwidth-Delay Product.
-    ///
-    /// For detailed explanation of BDP please refer to Google's BBR paper.
-    pub fn bdp(&self) -> usize {
-        if self.rt_prop_queue.is_empty() || self.btl_bw_queue.is_empty() {
-            self.config.mtu as usize
-        } else {
-            self.rt_prop_queue.front().unwrap().1 as usize * self.btl_bw_queue.front().unwrap().1
-        }
-    }
-
     pub fn dead_link(&self) -> bool {
         self.dead_link
     }
@@ -873,13 +762,9 @@ impl ControlBlock {
     }
 
     pub fn debug(&self) {
-        tracing::info!(
-            "rtprop {:4} btlbw {:8} appl {} dlvred {}",
-            self.rt_prop_queue.front().map_or(0, |p| p.1),
-            self.btl_bw_queue.front().map_or(0, |p| p.1),
-            self.app_limited_until,
-            self.delivered
-        )
+        if let Some(pcc) = &self.pcc {
+            pcc.debug();
+        }
     }
 }
 

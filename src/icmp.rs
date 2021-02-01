@@ -23,6 +23,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use crate::config::config;
 use anyhow::{Context, Result};
+use derivative::Derivative;
 use lazy_static::lazy_static;
 use parking_lot::Mutex as SyncMutex;
 use pnet_packet::icmp::{IcmpPacket, IcmpTypes, MutableIcmpPacket};
@@ -42,7 +43,6 @@ use std::thread;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tracing::{debug_span, instrument};
-use derivative::Derivative;
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug, Deserialize)]
 pub struct Endpoint {
